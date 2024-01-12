@@ -8,6 +8,7 @@
 #include "registry.hh"
 #include "tarball.hh"
 #include "url.hh"
+#include "cmark-cpp.hh"
 #include "value-to-json.hh"
 #include "fetch-to-store.hh"
 
@@ -210,92 +211,144 @@ static void prim_fetchTree(EvalState & state, const PosIdx pos, Value * * args, 
 static RegisterPrimOp primop_fetchTree({
     .name = "fetchTree",
     .args = {"input"},
-    .doc = R"(
-      Fetch a file system tree or a plain file using one of the supported backends and return an attribute set with:
+    .doc =  []() -> std::string {
+        using namespace cmark;
 
-      - the resulting fixed-output [store path](@docroot@/store/store-path.md)
-      - the corresponding [NAR](@docroot@/store/file-system-object/content-address.md#serial-nix-archive) hash
-      - backend-specific metadata (currently not documented). <!-- TODO: document output attributes -->
+        // Stores strings referenced by AST. Deallocate after rendering.
+        std::vector<std::string> textArena;
 
-      *input* must be an attribute set with the following attributes:
+        auto root = node_new(CMARK_NODE_DOCUMENT);
 
-      - `type` (String, required)
+        auto & before = textArena.emplace_back(stripIndentation(R"(
+          Fetch a file system tree or a plain file using one of the supported backends and return an attribute set with:
 
-        One of the [supported source types](#source-types).
-        This determines other required and allowed input attributes.
+          - the resulting fixed-output [store path](@docroot@/store/store-path.md)
+          - the corresponding [NAR](@docroot@/store/file-system-object/content-address.md#serial-nix-archive) hash
+          - backend-specific metadata (currently not documented). <!-- TODO: document output attributes -->
 
-      - `narHash` (String, optional)
+          *input* must be an attribute set with the following attributes:
 
-        The `narHash` parameter can be used to substitute the source of the tree.
-        It also allows for verification of tree contents that may not be provided by the underlying transfer mechanism.
-        If `narHash` is set, the source is first looked up is the Nix store and [substituters](@docroot@/command-ref/conf-file.md#conf-substituters), and only fetched if not available.
+          - `type` (String, required)
 
-      A subset of the output attributes of `fetchTree` can be re-used for subsequent calls to `fetchTree` to produce the same result again.
-      That is, `fetchTree` is idempotent.
+            One of the [supported source types](#source-types).
+            This determines other required and allowed input attributes.
 
-      Downloads are cached in `$XDG_CACHE_HOME/nix`.
-      The remote source will be fetched from the network if both are true:
-      - A NAR hash is supplied and the corresponding store path is not [valid](@docroot@/glossary.md#gloss-validity), that is, not available in the store
+          - `narHash` (String, optional)
 
-        > **Note**
-        >
-        > [Substituters](@docroot@/command-ref/conf-file.md#conf-substituters) are not used in fetching.
+            The `narHash` parameter can be used to substitute the source of the tree.
+            It also allows for verification of tree contents that may not be provided by the underlying transfer mechanism.
+            If `narHash` is set, the source is first looked up is the Nix store and [substituters](@docroot@/command-ref/conf-file.md#conf-substituters), and only fetched if not available.
 
-      - There is no cache entry or the cache entry is older than [`tarball-ttl`](@docroot@/command-ref/conf-file.md#conf-tarball-ttl)
+          A subset of the output attributes of `fetchTree` can be re-used for subsequent calls to `fetchTree` to produce the same result again.
+          That is, `fetchTree` is idempotent.
 
-      ## Source types
+          Downloads are cached in `$XDG_CACHE_HOME/nix`.
+          The remote source will be fetched from the network if both are true:
+          - A NAR hash is supplied and the corresponding store path is not [valid](@docroot@/glossary.md#gloss-validity), that is, not available in the store
 
-      The following source types and associated input attributes are supported.
+            > **Note**
+            >
+            > [Substituters](@docroot@/command-ref/conf-file.md#conf-substituters) are not used in fetching.
 
-      <!-- TODO: It would be soooo much more predictable to work with (and
-      document) if `fetchTree` was a curried call with the first parameter for
-      `type` or an attribute like `builtins.fetchTree.git`! -->
+          - There is no cache entry or the cache entry is older than [`tarball-ttl`](@docroot@/command-ref/conf-file.md#conf-tarball-ttl)
 
-      The following input types are still subject to change:
+          ## Source types
 
-      - `"path"`
-      - `"github"`
-      - `"gitlab"`
-      - `"sourcehut"`
-      - `"mercurial"`
+          The following source types and associated input attributes are supported.
 
-     *input* can also be a [URL-like reference](@docroot@/command-ref/new-cli/nix3-flake.md#flake-references).
-     The additional input types and the URL-like syntax requires the [`flakes` experimental feature](@docroot@/development/experimental-features.md#xp-feature-flakes) to be enabled.
+          <!-- TODO: It would be soooo much more predictable to work with (and
+          document) if `fetchTree` was a curried call with the first parameter for
+          `type` or an attribute like `builtins.fetchTree.git`! -->
+        )"));
+        parse_document(*root, before, CMARK_OPT_DEFAULT);
 
-      > **Example**
-      >
-      > Fetch a GitHub repository using the attribute set representation:
-      >
-      > ```nix
-      > builtins.fetchTree {
-      >   type = "github";
-      >   owner = "NixOS";
-      >   repo = "nixpkgs";
-      >   rev = "ae2e6b3958682513d28f7d633734571fb18285dd";
-      > }
-      > ```
-      >
-      > This evaluates to the following attribute set:
-      >
-      > ```nix
-      > {
-      >   lastModified = 1686503798;
-      >   lastModifiedDate = "20230611171638";
-      >   narHash = "sha256-rA9RqKP9OlBrgGCPvfd5HVAXDOy8k2SmPtB/ijShNXc=";
-      >   outPath = "/nix/store/l5m6qlvfs9sdw14ja3qbzpglcjlb6j1x-source";
-      >   rev = "ae2e6b3958682513d28f7d633734571fb18285dd";
-      >   shortRev = "ae2e6b3";
-      > }
-      > ```
+        auto & schemes = node_append_child(*root, node_new(CMARK_NODE_LIST));
 
-      > **Example**
-      >
-      > Fetch the same GitHub repository using the URL-like syntax:
-      >
-      >   ```nix
-      >   builtins.fetchTree "github:NixOS/nixpkgs/ae2e6b3958682513d28f7d633734571fb18285dd"
-      >   ```
-    )",
+        for (const auto & [schemeName, scheme] : fetchers::getAllInputSchemes()) {
+            auto & s = node_append_child(schemes, node_new(CMARK_NODE_ITEM));
+            {
+                auto & name_p = node_append_child(s, node_new(CMARK_NODE_PARAGRAPH));
+                auto & name = node_append_child(name_p, node_new(CMARK_NODE_TEXT));
+                node_set_literal(name, schemeName.data());
+            }
+            parse_document(s, scheme->schemeDescription(), CMARK_OPT_DEFAULT);
+
+            auto & attrs = node_append_child(s, node_new(CMARK_NODE_LIST));
+            for (const auto & [attrName, attribute] : scheme->allowedAttrs()) {
+                auto & a = node_append_child(attrs, node_new(CMARK_NODE_ITEM));
+                {
+                    auto & name_info = node_append_child(a, node_new(CMARK_NODE_PARAGRAPH));
+                    {
+                        auto & name = node_append_child(name_info, node_new(CMARK_NODE_CODE));
+                        auto & name_t = textArena.emplace_back(attrName);
+                        node_set_literal(name, name_t.c_str());
+                    }
+                    auto & info = node_append_child(name_info, node_new(CMARK_NODE_TEXT));
+                    auto & header = textArena.emplace_back(std::string { }
+                        + " (" + attribute.type
+                        + ", " + (attribute.required ? "required" : "optional")
+                        + ")");
+                    node_set_literal(info, header.c_str());
+                }
+                {
+                    auto & doc = textArena.emplace_back(stripIndentation(attribute.doc));
+                    parse_document(a, doc, CMARK_OPT_DEFAULT);
+                }
+            }
+        }
+
+        auto & after = textArena.emplace_back(stripIndentation(R"(
+          The following input types are still subject to change:
+
+          - `"path"`
+          - `"github"`
+          - `"gitlab"`
+          - `"sourcehut"`
+          - `"mercurial"`
+
+         *input* can also be a [URL-like reference](@docroot@/command-ref/new-cli/nix3-flake.md#flake-references).
+         The additional input types and the URL-like syntax requires the [`flakes` experimental feature](@docroot@/development/experimental-features.md#xp-feature-flakes) to be enabled.
+
+          > **Example**
+          >
+          > Fetch a GitHub repository using the attribute set representation:
+          >
+          > ```nix
+          > builtins.fetchTree {
+          >   type = "github";
+          >   owner = "NixOS";
+          >   repo = "nixpkgs";
+          >   rev = "ae2e6b3958682513d28f7d633734571fb18285dd";
+          > }
+          > ```
+          >
+          > This evaluates to the following attribute set:
+          >
+          > ```nix
+          > {
+          >   lastModified = 1686503798;
+          >   lastModifiedDate = "20230611171638";
+          >   narHash = "sha256-rA9RqKP9OlBrgGCPvfd5HVAXDOy8k2SmPtB/ijShNXc=";
+          >   outPath = "/nix/store/l5m6qlvfs9sdw14ja3qbzpglcjlb6j1x-source";
+          >   rev = "ae2e6b3958682513d28f7d633734571fb18285dd";
+          >   shortRev = "ae2e6b3";
+          > }
+          > ```
+
+          > **Example**
+          >
+          > Fetch the same GitHub repository using the URL-like syntax:
+          >
+          >   ```nix
+          >   builtins.fetchTree "github:NixOS/nixpkgs/ae2e6b3958682513d28f7d633734571fb18285dd"
+          >   ```
+        )"));
+        parse_document(*root, after, CMARK_OPT_DEFAULT);
+
+        auto p = render_commonmark(*root, CMARK_OPT_DEFAULT, 0);
+        assert(p);
+        return { &*p };
+    }(),
     .fun = prim_fetchTree,
     .experimentalFeature = Xp::FetchTree,
 });
