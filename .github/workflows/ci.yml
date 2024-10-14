@@ -34,13 +34,13 @@ jobs:
         name: '${{ env.CACHIX_NAME }}'
         signingKey: '${{ secrets.CACHIX_SIGNING_KEY }}'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - run: nix --experimental-features 'nix-command flakes' flake check -L
-    - name: breakpoint if failed
-      if: failure()
+    - name: breakpoint
+      # if: failure()
       uses: namespacelabs/breakpoint-action@v0
       with:
         duration: 60m
         authorized-users: roberth
+    - run: nix --experimental-features 'nix-command flakes' flake check -L
 
   check_secrets:
     permissions:
