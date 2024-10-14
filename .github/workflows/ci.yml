@@ -16,6 +16,9 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: read
     steps:
     - uses: actions/checkout@v4
       with:
@@ -32,6 +35,12 @@ jobs:
         signingKey: '${{ secrets.CACHIX_SIGNING_KEY }}'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
     - run: nix --experimental-features 'nix-command flakes' flake check -L
+    - name: breakpoint if failed
+      if: failure()
+      uses: namespacelabs/breakpoint-action@v0
+      with:
+        duration: 60m
+        authorized-users: roberth
 
   check_secrets:
     permissions:
