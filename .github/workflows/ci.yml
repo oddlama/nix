@@ -38,7 +38,7 @@ jobs:
       # if: failure()
       uses: namespacelabs/breakpoint-action@v0
       with:
-        duration: 60m
+        duration: 240m
         authorized-users: roberth
     - run: nix --experimental-features 'nix-command flakes' flake check -L
 
