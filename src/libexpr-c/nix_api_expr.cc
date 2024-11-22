@@ -1,6 +1,3 @@
-#include <cstring>
-#include <stdexcept>
-#include <string>
 
 #include "eval.hh"
 #include "eval-gc.hh"
@@ -13,6 +10,10 @@
 #include "nix_api_store_internal.h"
 #include "nix_api_util.h"
 #include "nix_api_util_internal.h"
+
+#include <cstring>
+#include <stdexcept>
+#include <string>
 
 #if HAVE_BOEHMGC
 #  include <mutex>
