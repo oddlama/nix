@@ -3889,6 +3889,46 @@ static RegisterPrimOp primop_div({
     .fun = prim_div,
 });
 
+static void prim_bitShl(EvalState & state, const PosIdx pos, Value * * args, Value & v)
+{
+    auto i1 = state.forceInt(*args[0], pos, "while evaluating the first argument passed to builtins.bitShl");
+    auto i2 = state.forceInt(*args[1], pos, "while evaluating the second argument passed to builtins.bitShl");
+    if (i1 > 63) {
+        v.mkInt(0);
+    } else {
+        v.mkInt(i2 << i1);
+    }
+}
+
+static RegisterPrimOp primop_bitShl({
+    .name = "__bitShl",
+    .args = {"e1", "e2"},
+    .doc = R"(
+      Left shift integer *e2* by *e1*.
+    )",
+    .fun = prim_bitShl,
+});
+
+static void prim_bitShr(EvalState & state, const PosIdx pos, Value * * args, Value & v)
+{
+    auto i1 = state.forceInt(*args[0], pos, "while evaluating the first argument passed to builtins.bitShr");
+    auto i2 = state.forceInt(*args[1], pos, "while evaluating the second argument passed to builtins.bitShr");
+    if (i1 > 63) {
+        v.mkInt(0);
+    } else {
+        v.mkInt(i2 >> i1);
+    }
+}
+
+static RegisterPrimOp primop_bitShr({
+    .name = "__bitShr",
+    .args = {"e1", "e2"},
+    .doc = R"(
+      Right shift integer *e2* by *e1*.
+    )",
+    .fun = prim_bitShr,
+});
+
 static void prim_bitAnd(EvalState & state, const PosIdx pos, Value * * args, Value & v)
 {
     v.mkInt(state.forceInt(*args[0], pos, "while evaluating the first argument passed to builtins.bitAnd")

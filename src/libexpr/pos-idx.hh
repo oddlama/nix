@@ -12,7 +12,6 @@ class PosIdx
     friend class std::hash<PosIdx>;
 
 private:
-    uint32_t id;
 
     explicit PosIdx(uint32_t id)
         : id(id)
@@ -20,6 +19,7 @@ private:
     }
 
 public:
+    uint32_t id;
     PosIdx()
         : id(0)
     {

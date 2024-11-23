@@ -364,6 +364,9 @@ EvalState::EvalState(
 
 EvalState::~EvalState()
 {
+    if (settings.traceFunctionCalls) {
+        printFunctionCallTrace(this);
+    }
 }
 
 
@@ -1493,7 +1496,7 @@ void EvalState::callFunction(Value & fun, size_t nrArgs, Value * * args, Value &
     CallDepth _level(callDepth);
 
     auto trace = settings.traceFunctionCalls
-        ? std::make_unique<FunctionCallTrace>(positions[pos])
+        ? std::make_unique<FunctionCallTrace>(pos)
         : nullptr;
 
     forceValue(fun, pos);

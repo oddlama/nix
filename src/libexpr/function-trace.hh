@@ -7,10 +7,13 @@
 
 namespace nix {
 
+void printFunctionCallTrace(EvalState* es);
+
 struct FunctionCallTrace
 {
-    const Pos pos;
-    FunctionCallTrace(const Pos & pos);
+    PosIdx posidx;
+    int64_t start;
+    FunctionCallTrace(PosIdx posidx);
     ~FunctionCallTrace();
 };
 }
