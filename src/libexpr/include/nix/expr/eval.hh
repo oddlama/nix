@@ -17,6 +17,7 @@
 #include "nix/expr/repl-exit-status.hh"
 #include "nix/util/ref.hh"
 #include "nix/expr/counter.hh"
+#include "nix/expr/provenance.hh"
 
 // For `NIX_USE_BOEHMGC`, and if that's set, `GC_THREADS`
 #include "nix/expr/config.hh"
@@ -507,6 +508,35 @@ private:
      * Cache used by prim_match().
      */
     const ref<RegexCache> regexCache;
+
+    /**
+     * Map from values to their provenance information.
+     * Only values explicitly tracked via trackProvenance have entries here.
+     * For compound types (attrsets, lists), uses pointer-based tracking.
+     */
+    boost::unordered_flat_map<const Value *, const Provenance *> provenanceMap;
+
+    /**
+     * Value-based provenance maps for scalar types.
+     * These are needed because scalar values get copied around and
+     * pointer-based tracking doesn't survive copies.
+     * Note: This means two different tracked values with the same scalar
+     * content will share provenance - a known limitation.
+     */
+    boost::unordered_flat_map<int64_t, const Provenance *> intProvenanceMap;
+    boost::unordered_flat_map<double, const Provenance *> floatProvenanceMap;
+    boost::unordered_flat_map<bool, const Provenance *> boolProvenanceMap;
+
+    /**
+     * Map from values to their source positions (for values that have been forced).
+     * Used by trackProvenance to capture the position where a value was defined.
+     */
+    boost::unordered_flat_map<const Value *, PosIdx> valueSourcePositions;
+
+    /**
+     * Interner for provenance tree nodes.
+     */
+    ProvenanceInterner provenanceInterner;
 
 public:
 
@@ -1024,6 +1054,38 @@ public:
 
     DocComment getDocCommentForPos(PosIdx pos);
 
+    /**
+     * Get the provenance attached to a value, or nullptr if not tracked.
+     */
+    const Provenance * getProvenance(const Value * v) const;
+
+    /**
+     * Attach provenance to a value.
+     */
+    void setProvenance(const Value * v, const Provenance * prov);
+
+    /**
+     * Remove provenance from a value.
+     */
+    void removeProvenance(const Value * v);
+
+    /**
+     * Get the source position for a value (where it was defined).
+     * Returns noPos if unknown.
+     */
+    PosIdx getValueSourcePos(const Value & v) const;
+
+    /**
+     * Merge provenance from multiple operands.
+     * - If 0 operands have provenance: returns nullptr
+     * - If 1 operand has provenance: returns that provenance (passthrough)
+     * - If 2+ operands have provenance: creates new tree node with given kind
+     */
+    const Provenance * mergeProvenance(
+        const std::vector<const Provenance *> & provenances,
+        const std::string & kind,
+        PosIdx pos);
+
 private:
 
     /**
@@ -1076,6 +1138,9 @@ private:
     friend void prim_getAttr(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_match(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_split(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_trackProvenance(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_getProvenance(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_removeProvenance(EvalState & state, const PosIdx pos, Value ** args, Value & v);
 
     friend struct Value;
     friend class ListBuilder;

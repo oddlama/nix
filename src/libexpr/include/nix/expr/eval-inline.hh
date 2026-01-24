@@ -89,6 +89,8 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
         Env * env = v.thunk().env;
         assert(env || v.isBlackhole());
         Expr * expr = v.thunk().expr;
+        // Capture source position before forcing
+        PosIdx sourcePos = expr ? expr->getPos() : noPos;
         try {
             v.mkBlackhole();
             // checkInterrupt();
@@ -101,6 +103,9 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
             tryFixupBlackHolePos(v, pos);
             throw;
         }
+        // Store source position for provenance tracking
+        if (sourcePos != noPos)
+            valueSourcePositions[&v] = sourcePos;
     } else if (v.isApp())
         callFunction(*v.app().left, *v.app().right, v, pos);
 }

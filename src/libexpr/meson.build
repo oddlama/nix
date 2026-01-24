@@ -169,6 +169,7 @@ sources = files(
   'primops.cc',
   'print-ambiguous.cc',
   'print.cc',
+  'provenance.cc',
   'search-path.cc',
   'value-to-json.cc',
   'value-to-xml.cc',

@@ -1915,12 +1915,18 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
     const Bindings & bindings1 = *v1.attrs();
     if (bindings1.empty()) {
         v = v2;
+        // Provenance passthrough
+        if (auto prov = state.getProvenance(&v2))
+            state.setProvenance(&v, prov);
         return;
     }
 
     const Bindings & bindings2 = *v2.attrs();
     if (bindings2.empty()) {
         v = v1;
+        // Provenance passthrough
+        if (auto prov = state.getProvenance(&v1))
+            state.setProvenance(&v, prov);
         return;
     }
 
@@ -1944,6 +1950,13 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
         v.mkAttrs(attrs.alreadySorted());
 
         state.nrOpUpdateValuesCopied += bindings2.size();
+
+        // Provenance propagation
+        std::vector<const Provenance *> provenances;
+        if (auto prov = state.getProvenance(&v1)) provenances.push_back(prov);
+        if (auto prov = state.getProvenance(&v2)) provenances.push_back(prov);
+        if (auto merged = state.mergeProvenance(provenances, "attr_merge", noPos))
+            state.setProvenance(&v, merged);
         return;
     }
 
@@ -1981,6 +1994,13 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
     v.mkAttrs(attrs.alreadySorted());
 
     state.nrOpUpdateValuesCopied += v.attrs()->size();
+
+    // Provenance propagation
+    std::vector<const Provenance *> provenances;
+    if (auto prov = state.getProvenance(&v1)) provenances.push_back(prov);
+    if (auto prov = state.getProvenance(&v2)) provenances.push_back(prov);
+    if (auto merged = state.mergeProvenance(provenances, "attr_merge", noPos))
+        state.setProvenance(&v, merged);
 }
 
 void ExprOpUpdate::eval(EvalState & state, Env & env, Value & v)
@@ -2042,6 +2062,9 @@ void EvalState::concatLists(
 
     if (nonEmpty && len == nonEmpty->listSize()) {
         v = *nonEmpty;
+        // Provenance passthrough for single non-empty list
+        if (auto prov = getProvenance(nonEmpty))
+            setProvenance(&v, prov);
         return;
     }
 
@@ -2055,6 +2078,15 @@ void EvalState::concatLists(
         pos += l;
     }
     v.mkList(list);
+
+    // Provenance propagation for list concatenation
+    std::vector<const Provenance *> provenances;
+    for (size_t n = 0; n < nrLists; ++n) {
+        if (auto prov = getProvenance(lists[n]))
+            provenances.push_back(prov);
+    }
+    if (auto merged = mergeProvenance(provenances, "list_concat", pos))
+        setProvenance(&v, merged);
 }
 
 void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
@@ -2072,9 +2104,17 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
     SmallTemporaryValueVector<conservativeStackReservation> values(es.size());
     Value * vTmpP = values.data();
 
+    // Collect provenance from all operands
+    std::vector<const Provenance *> provenances;
+    provenances.reserve(es.size());
+
     for (auto & [i_pos, i] : es) {
         Value & vTmp = *vTmpP++;
         i->eval(state, env, vTmp);
+
+        // Collect provenance
+        if (auto prov = state.getProvenance(&vTmp))
+            provenances.push_back(prov);
 
         /* If the first element is a path, then the result will also
            be a path, we don't copy anything (yet - that's done later,
@@ -2129,6 +2169,14 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
         first = false;
     }
 
+    // Determine kind for provenance based on result type
+    std::string provenanceKind;
+    if (firstType == nInt || firstType == nFloat) {
+        provenanceKind = "binary_add";
+    } else {
+        provenanceKind = "string_interpolation";
+    }
+
     if (firstType == nInt) {
         v.mkInt(n);
     } else if (firstType == nFloat) {
@@ -2155,6 +2203,10 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
         *tmp = '\0';
         v.mkStringMove(resultStr, context, state.mem);
     }
+
+    // Propagate provenance
+    if (auto merged = state.mergeProvenance(provenances, provenanceKind, pos))
+        state.setProvenance(&v, merged);
 }
 
 void ExprPos::eval(EvalState & state, Env & env, Value & v)
@@ -3295,6 +3347,94 @@ DocComment EvalState::getDocCommentForPos(PosIdx pos)
     if (it == table->second.end())
         return {};
     return it->second;
+}
+
+const Provenance * EvalState::getProvenance(const Value * v) const
+{
+    // For scalar types, use value-based lookup since values get copied
+    // and pointer-based tracking doesn't survive copies
+    if (v->type() == nInt) {
+        auto it = intProvenanceMap.find(v->integer().value);
+        if (it != intProvenanceMap.end())
+            return it->second;
+    } else if (v->type() == nFloat) {
+        auto it = floatProvenanceMap.find(v->fpoint());
+        if (it != floatProvenanceMap.end())
+            return it->second;
+    } else if (v->type() == nBool) {
+        auto it = boolProvenanceMap.find(v->boolean());
+        if (it != boolProvenanceMap.end())
+            return it->second;
+    }
+    // Fall back to pointer-based lookup for compound types
+    auto it = provenanceMap.find(v);
+    if (it != provenanceMap.end())
+        return it->second;
+    return nullptr;
+}
+
+void EvalState::setProvenance(const Value * v, const Provenance * prov)
+{
+    if (!prov) return;
+    // For scalar types, use value-based storage
+    if (v->type() == nInt) {
+        intProvenanceMap[v->integer().value] = prov;
+    } else if (v->type() == nFloat) {
+        floatProvenanceMap[v->fpoint()] = prov;
+    } else if (v->type() == nBool) {
+        boolProvenanceMap[v->boolean()] = prov;
+    } else {
+        provenanceMap[v] = prov;
+    }
+}
+
+void EvalState::removeProvenance(const Value * v)
+{
+    if (v->type() == nInt) {
+        intProvenanceMap.erase(v->integer().value);
+    } else if (v->type() == nFloat) {
+        floatProvenanceMap.erase(v->fpoint());
+    } else if (v->type() == nBool) {
+        boolProvenanceMap.erase(v->boolean());
+    }
+    provenanceMap.erase(v);
+}
+
+PosIdx EvalState::getValueSourcePos(const Value & v) const
+{
+    // First check if it's a thunk - get position from the expr
+    if (v.isThunk()) {
+        if (v.thunk().expr)
+            return v.thunk().expr->getPos();
+    }
+
+    // Otherwise check the valueSourcePositions map
+    auto it = valueSourcePositions.find(&v);
+    if (it != valueSourcePositions.end())
+        return it->second;
+
+    return noPos;
+}
+
+const Provenance * EvalState::mergeProvenance(
+    const std::vector<const Provenance *> & provenances,
+    const std::string & kind,
+    PosIdx pos)
+{
+    // Filter out nullptrs
+    std::vector<const Provenance *> tracked;
+    for (auto p : provenances)
+        if (p)
+            tracked.push_back(p);
+
+    if (tracked.empty())
+        return nullptr;
+
+    if (tracked.size() == 1)
+        return tracked[0]; // Passthrough
+
+    // Multiple tracked values - create new tree node
+    return provenanceInterner.intern(nullptr, kind, pos, tracked);
 }
 
 std::string ExternalValueBase::coerceToString(

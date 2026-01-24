@@ -25,7 +25,7 @@ struct ExperimentalFeatureDetails
  * feature, we either have no issue at all if few features are not added
  * at the end of the list, or a proper merge conflict if they are.
  */
-constexpr size_t numXpFeatures = 1 + static_cast<size_t>(Xp::BLAKE3Hashes);
+constexpr size_t numXpFeatures = 1 + static_cast<size_t>(Xp::ProvenanceTracking);
 
 constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails = {{
     {
@@ -320,6 +320,29 @@ constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails
             Enables support for BLAKE3 hashes.
         )",
         .trackingUrl = "https://github.com/NixOS/nix/milestone/60",
+    },
+    {
+        .tag = Xp::ProvenanceTracking,
+        .name = "provenance-tracking",
+        .description = R"(
+            Enables provenance tracking for Nix values.
+
+            This feature allows tracking where values come from and how they were
+            derived through operations. It provides three builtins:
+
+            - `builtins.trackProvenance <identifier> <value>`: Attach provenance
+              information to a value with a user-defined identifier.
+
+            - `builtins.getProvenance <value>`: Get the provenance tree for a value,
+              or `null` if not tracked.
+
+            - `builtins.removeProvenance <value>`: Remove provenance from a value.
+
+            Provenance is automatically propagated through operations:
+            - Single tracked operand: provenance passes through unchanged
+            - Multiple tracked operands: creates a new tree node combining dependencies
+        )",
+        .trackingUrl = "https://github.com/NixOS/nix/milestone/63",
     },
 }};
 
