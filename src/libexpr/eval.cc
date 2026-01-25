@@ -3351,53 +3351,17 @@ DocComment EvalState::getDocCommentForPos(PosIdx pos)
 
 const Provenance * EvalState::getProvenance(const Value * v) const
 {
-    // For scalar types, use value-based lookup since values get copied
-    // and pointer-based tracking doesn't survive copies
-    if (v->type() == nInt) {
-        auto it = intProvenanceMap.find(v->integer().value);
-        if (it != intProvenanceMap.end())
-            return it->second;
-    } else if (v->type() == nFloat) {
-        auto it = floatProvenanceMap.find(v->fpoint());
-        if (it != floatProvenanceMap.end())
-            return it->second;
-    } else if (v->type() == nBool) {
-        auto it = boolProvenanceMap.find(v->boolean());
-        if (it != boolProvenanceMap.end())
-            return it->second;
-    }
-    // Fall back to pointer-based lookup for compound types
-    auto it = provenanceMap.find(v);
-    if (it != provenanceMap.end())
-        return it->second;
-    return nullptr;
+    return v->provenance;
 }
 
-void EvalState::setProvenance(const Value * v, const Provenance * prov)
+void EvalState::setProvenance(Value * v, const Provenance * prov)
 {
-    if (!prov) return;
-    // For scalar types, use value-based storage
-    if (v->type() == nInt) {
-        intProvenanceMap[v->integer().value] = prov;
-    } else if (v->type() == nFloat) {
-        floatProvenanceMap[v->fpoint()] = prov;
-    } else if (v->type() == nBool) {
-        boolProvenanceMap[v->boolean()] = prov;
-    } else {
-        provenanceMap[v] = prov;
-    }
+    v->provenance = prov;
 }
 
-void EvalState::removeProvenance(const Value * v)
+void EvalState::removeProvenance(Value * v)
 {
-    if (v->type() == nInt) {
-        intProvenanceMap.erase(v->integer().value);
-    } else if (v->type() == nFloat) {
-        floatProvenanceMap.erase(v->fpoint());
-    } else if (v->type() == nBool) {
-        boolProvenanceMap.erase(v->boolean());
-    }
-    provenanceMap.erase(v);
+    v->provenance = nullptr;
 }
 
 PosIdx EvalState::getValueSourcePos(const Value & v) const

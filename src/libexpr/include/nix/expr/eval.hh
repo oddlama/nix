@@ -510,24 +510,6 @@ private:
     const ref<RegexCache> regexCache;
 
     /**
-     * Map from values to their provenance information.
-     * Only values explicitly tracked via trackProvenance have entries here.
-     * For compound types (attrsets, lists), uses pointer-based tracking.
-     */
-    boost::unordered_flat_map<const Value *, const Provenance *> provenanceMap;
-
-    /**
-     * Value-based provenance maps for scalar types.
-     * These are needed because scalar values get copied around and
-     * pointer-based tracking doesn't survive copies.
-     * Note: This means two different tracked values with the same scalar
-     * content will share provenance - a known limitation.
-     */
-    boost::unordered_flat_map<int64_t, const Provenance *> intProvenanceMap;
-    boost::unordered_flat_map<double, const Provenance *> floatProvenanceMap;
-    boost::unordered_flat_map<bool, const Provenance *> boolProvenanceMap;
-
-    /**
      * Map from values to their source positions (for values that have been forced).
      * Used by trackProvenance to capture the position where a value was defined.
      */
@@ -1062,12 +1044,12 @@ public:
     /**
      * Attach provenance to a value.
      */
-    void setProvenance(const Value * v, const Provenance * prov);
+    void setProvenance(Value * v, const Provenance * prov);
 
     /**
      * Remove provenance from a value.
      */
-    void removeProvenance(const Value * v);
+    void removeProvenance(Value * v);
 
     /**
      * Get the source position for a value (where it was defined).

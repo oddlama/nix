@@ -82,6 +82,7 @@ struct Expr;
 struct ExprLambda;
 struct ExprBlackHole;
 struct PrimOp;
+struct Provenance;
 class Symbol;
 class SymbolStr;
 class PosIdx;
@@ -987,6 +988,13 @@ static_assert(std::random_access_iterator<ListView::iterator>);
 struct Value : public ValueStorage<sizeof(void *)>
 {
     friend std::string showType(const Value & v);
+
+    /**
+     * Optional provenance tracking information.
+     * When set, tracks where this value came from.
+     * Nullptr for values without provenance tracking.
+     */
+    const Provenance * provenance = nullptr;
 
     /**
      * Empty list constant.
