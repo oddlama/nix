@@ -146,7 +146,7 @@ static Expr * makeCall(Exprs & exprs, PosIdx pos, Expr * fn, Expr * arg) {
 %token <NixFloat> FLOAT_LIT
 %token <StringToken> PATH HPATH SPATH PATH_END
 %token <StringToken> URI
-%token IF THEN ELSE ASSERT WITH LET IN_KW REC INHERIT EQ NEQ AND OR IMPL OR_KW
+%token IF THEN ELSE ASSERT WITH LET IN_KW REC TRACKED INHERIT EQ NEQ AND OR IMPL OR_KW
 %token PIPE_FROM PIPE_INTO /* <| and |> */
 %token DOLLAR_CURLY /* == ${ */
 %token IND_STRING_OPEN IND_STRING_CLOSE
@@ -329,6 +329,12 @@ expr_simple
     { $3->recursive = true; $3->pos = CUR_POS; $$ = state->exprs.add<ExprSelect>(state->exprs.alloc, noPos, $3, state->s.body); }
   | REC '{' binds '}'
     { $3->recursive = true; $3->pos = CUR_POS; $$ = $3; }
+  | TRACKED '{' binds '}'
+    { $3->tracked = true; $3->pos = CUR_POS; $$ = $3; }
+  | TRACKED REC '{' binds '}'
+    { $4->tracked = true; $4->recursive = true; $4->pos = CUR_POS; $$ = $4; }
+  | REC TRACKED '{' binds '}'
+    { $4->tracked = true; $4->recursive = true; $4->pos = CUR_POS; $$ = $4; }
   | '{' binds1 '}'
     { $2->pos = CUR_POS; $$ = $2; }
   | '{' '}'

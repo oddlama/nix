@@ -122,6 +122,7 @@ with        { return WITH; }
 let         { return LET; }
 in          { return IN_KW; }
 rec         { return REC; }
+tracked     { return TRACKED; }
 inherit     { return INHERIT; }
 or          { return OR_KW; }
 \.\.\.      { return ELLIPSIS; }

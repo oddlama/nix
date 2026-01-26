@@ -3207,6 +3207,104 @@ static RegisterPrimOp primop_isAttrs({
     .fun = prim_isAttrs,
 });
 
+/* Determine whether the argument is a tracked attrset. */
+static void prim_isTracked(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    state.forceValue(*args[0], pos);
+    v.mkBool(args[0]->type() == nAttrs && args[0]->attrs()->isTracked());
+}
+
+static RegisterPrimOp primop_isTracked({
+    .name = "__isTracked",
+    .args = {"e"},
+    .doc = R"(
+      Return `true` if *e* evaluates to a tracked attribute set (created with `tracked { ... }`),
+      and `false` otherwise.
+    )",
+    .fun = prim_isTracked,
+});
+
+/* Get provenance information for an attribute in a tracked attrset. */
+static void prim_getAttrProvenance(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    state.forceAttrs(*args[0], pos, "while evaluating the first argument passed to builtins.getAttrProvenance");
+    auto attrName = state.forceStringNoCtx(*args[1], pos, "while evaluating the second argument passed to builtins.getAttrProvenance");
+
+    auto* bindings = args[0]->attrs();
+    if (!bindings->isTracked()) {
+        v.mkNull();
+        return;
+    }
+
+    auto sym = state.symbols.create(attrName);
+    auto* prov = bindings->getProvenance(sym);
+    if (!prov) {
+        v.mkNull();
+        return;
+    }
+
+    auto attrs = state.buildBindings(2);
+
+    // definedAt
+    auto& defAt = attrs.alloc(state.symbols.create("definedAt"));
+    if (prov->definedAt != noPos) {
+        auto p = state.positions[prov->definedAt];
+        auto posAttrs = state.buildBindings(3);
+        if (auto* path = std::get_if<SourcePath>(&p.origin))
+            posAttrs.alloc(state.symbols.create("file")).mkString(path->to_string(), state.mem);
+        posAttrs.alloc(state.symbols.create("line")).mkInt(p.line);
+        posAttrs.alloc(state.symbols.create("column")).mkInt(p.column);
+        defAt.mkAttrs(posAttrs);
+    } else {
+        defAt.mkNull();
+    }
+
+    // dependencies
+    auto& deps = attrs.alloc(state.symbols.create("dependencies"));
+    auto list = state.buildList(prov->dependencies.size());
+    for (size_t i = 0; i < prov->dependencies.size(); i++) {
+        auto& [_, depAttr] = prov->dependencies[i];
+        list[i] = state.allocValue();
+        auto inner = state.buildList(1);
+        inner[0] = state.allocValue();
+        inner[0]->mkString(std::string_view(state.symbols[depAttr]), state.mem);
+        list[i]->mkList(inner);
+    }
+    deps.mkList(list);
+
+    v.mkAttrs(attrs);
+}
+
+static RegisterPrimOp primop_getAttrProvenance({
+    .name = "__getAttrProvenance",
+    .args = {"set", "name"},
+    .doc = R"(
+      Get provenance information for an attribute in a tracked attribute set.
+      Returns `null` if the set is not tracked or the attribute doesn't exist.
+
+      Otherwise returns an attribute set with:
+      - `definedAt`: The source location where the attribute was defined
+        (with `file`, `line`, and `column` attributes), or `null` if unknown.
+      - `dependencies`: A list of attribute paths that were accessed during
+        the evaluation of this attribute's value.
+
+      Example:
+      ```nix
+      let
+        fix = f: let x = f x; in x;
+        config = self: tracked {
+          a = 1;
+          b = self.a + 1;
+        };
+        result = fix config;
+      in
+        builtins.getAttrProvenance result "b"
+      # => { definedAt = { file = "..."; line = 5; column = 5; }; dependencies = [["a"]]; }
+      ```
+    )",
+    .fun = prim_getAttrProvenance,
+});
+
 static void prim_removeAttrs(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     state.forceAttrs(*args[0], pos, "while evaluating the first argument passed to builtins.removeAttrs");

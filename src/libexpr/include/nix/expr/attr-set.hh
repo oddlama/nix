@@ -6,6 +6,7 @@
 
 #include <boost/container/static_vector.hpp>
 #include <boost/iterator/function_output_iterator.hpp>
+#include <boost/unordered/unordered_flat_map.hpp>
 
 #include <algorithm>
 #include <functional>
@@ -46,6 +47,14 @@ static_assert(
     "performance of the evaluator is highly sensitive to the size of Attr. "
     "avoid introducing any padding into Attr if at all possible, and do not "
     "introduce new fields that need not be present for almost every instance.");
+
+/**
+ * Per-attribute provenance information for tracked attrsets.
+ */
+struct AttrProvenance {
+    PosIdx definedAt;
+    std::vector<std::pair<const Bindings*, Symbol>> dependencies;
+};
 
 /**
  * Bindings contains all the attributes of an attribute set. It is defined
@@ -97,6 +106,12 @@ private:
     const Bindings * baseLayer = nullptr;
 
     /**
+     * Optional provenance map for tracked attrsets.
+     * Null for non-tracked attrsets.
+     */
+    boost::unordered_flat_map<Symbol, AttrProvenance, std::hash<Symbol>>* provenanceMap = nullptr;
+
+    /**
      * Flexible array member of attributes.
      */
     Attr attrs[0];
@@ -126,6 +141,28 @@ public:
     {
         return size() == 0;
     }
+
+    /**
+     * Check if this attrset has provenance tracking enabled.
+     */
+    bool isTracked() const { return provenanceMap != nullptr; }
+
+    /**
+     * Initialize the provenance map for this attrset.
+     */
+    void initProvenance(EvalMemory & mem);
+
+    /**
+     * Get provenance for an attribute.
+     * Returns nullptr if not tracked or attribute not found.
+     */
+    AttrProvenance* getProvenance(Symbol name);
+    const AttrProvenance* getProvenance(Symbol name) const;
+
+    /**
+     * Set provenance for an attribute.
+     */
+    void setProvenance(Symbol name, AttrProvenance prov);
 
     class iterator
     {
@@ -562,6 +599,12 @@ public:
         finishSizeIfNecessary();
         return bindings;
     }
+
+    /**
+     * Get the underlying Bindings pointer for provenance tracking.
+     * Note: The bindings may not be fully constructed yet.
+     */
+    Bindings * getBindings() noexcept { return bindings; }
 
     size_t capacity() const noexcept
     {

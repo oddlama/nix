@@ -193,6 +193,14 @@ struct RegexCache;
 
 ref<RegexCache> makeRegexCache();
 
+/**
+ * Context for tracking attribute access dependencies in tracked attrsets.
+ */
+struct TrackingContext {
+    Bindings* bindings;
+    Symbol attr;
+};
+
 struct DebugTrace
 {
     /* WARNING: Converting PosIdx -> Pos should be done with extra care. This is
@@ -872,6 +880,33 @@ private:
      * out of system stack.
      */
     size_t callDepth = 0;
+
+    /**
+     * Stack of tracking contexts for recording attribute access dependencies.
+     */
+    std::vector<TrackingContext> trackingContextStack;
+
+public:
+
+    /**
+     * Push a tracking context for recording dependencies when evaluating an attribute.
+     */
+    void pushTrackingContext(Bindings* b, Symbol attr);
+
+    /**
+     * Pop the current tracking context.
+     */
+    void popTrackingContext();
+
+    /**
+     * Record a dependency on an attribute access.
+     */
+    void recordDependency(const Bindings* bindings, Symbol attr);
+
+    /**
+     * Check if we are currently in a tracking context.
+     */
+    bool inTrackingContext() const { return !trackingContextStack.empty(); }
 
 public:
 

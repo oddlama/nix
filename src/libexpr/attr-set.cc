@@ -38,6 +38,33 @@ void Bindings::sort()
     std::sort(attrs, attrs + numAttrs);
 }
 
+void Bindings::initProvenance(EvalMemory & mem)
+{
+    if (!provenanceMap) {
+        provenanceMap = new (mem.allocBytes(sizeof(*provenanceMap)))
+            boost::unordered_flat_map<Symbol, AttrProvenance, std::hash<Symbol>>();
+    }
+}
+
+AttrProvenance* Bindings::getProvenance(Symbol name)
+{
+    if (!provenanceMap) return nullptr;
+    auto it = provenanceMap->find(name);
+    return it != provenanceMap->end() ? &it->second : nullptr;
+}
+
+const AttrProvenance* Bindings::getProvenance(Symbol name) const
+{
+    if (!provenanceMap) return nullptr;
+    auto it = provenanceMap->find(name);
+    return it != provenanceMap->end() ? &it->second : nullptr;
+}
+
+void Bindings::setProvenance(Symbol name, AttrProvenance prov)
+{
+    if (provenanceMap) (*provenanceMap)[name] = std::move(prov);
+}
+
 Value & Value::mkAttrs(BindingsBuilder & bindings)
 {
     mkAttrs(bindings.finish());

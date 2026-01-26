@@ -357,6 +357,7 @@ struct ExprOpHasAttr : Expr
 struct ExprAttrs : Expr
 {
     bool recursive;
+    bool tracked = false;
     PosIdx pos;
 
     struct AttrDef
