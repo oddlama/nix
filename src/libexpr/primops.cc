@@ -3343,7 +3343,7 @@ static void prim_makeTracked(EvalState & state, const PosIdx pos, Value ** args,
             auto s = state.forceStringNoCtx(*elem, pos, "while evaluating a path element in builtins.makeTracked");
             path.push_back(state.symbols.create(s));
         }
-        resultBindings.getBindings()->setTrackingPath(state.mem, std::move(path));
+        resultBindings.getBindings()->setTrackingPath(std::move(path));
     }
 
     // Copy all attributes (as thunks to preserve laziness)

@@ -57,6 +57,15 @@ struct AttrProvenance {
 };
 
 /**
+ * Consolidated provenance data for tracked attrsets.
+ * Only allocated for attrsets with provenance tracking enabled.
+ */
+struct ProvenanceData {
+    boost::unordered_flat_map<Symbol, AttrProvenance, std::hash<Symbol>> map;
+    std::vector<Symbol> path;  // tracking path prefix
+};
+
+/**
  * Bindings contains all the attributes of an attribute set. It is defined
  * by its size and its capacity, the capacity being the number of Attr
  * elements allocated after this structure, while the size corresponds to
@@ -106,18 +115,10 @@ private:
     const Bindings * baseLayer = nullptr;
 
     /**
-     * Optional provenance map for tracked attrsets.
-     * Null for non-tracked attrsets.
+     * Optional provenance data for tracked attrsets.
+     * Null for non-tracked attrsets (the vast majority).
      */
-    boost::unordered_flat_map<Symbol, AttrProvenance, std::hash<Symbol>>* provenanceMap = nullptr;
-
-    /**
-     * Optional path prefix for this tracked attrset.
-     * When set, dependency serialization uses this to reconstruct
-     * full attribute paths (e.g., ["services" "nginx"] + ["enable"]).
-     * Null for non-tracked or root-level tracked attrsets.
-     */
-    std::vector<Symbol>* trackingPath = nullptr;
+    ProvenanceData* provenance = nullptr;
 
     /**
      * Flexible array member of attributes.
@@ -153,10 +154,10 @@ public:
     /**
      * Check if this attrset has provenance tracking enabled.
      */
-    bool isTracked() const { return provenanceMap != nullptr; }
+    bool isTracked() const { return provenance != nullptr; }
 
     /**
-     * Initialize the provenance map for this attrset.
+     * Initialize the provenance data for this attrset.
      */
     void initProvenance(EvalMemory & mem);
 
@@ -175,12 +176,14 @@ public:
     /**
      * Get the tracking path prefix for this attrset.
      */
-    const std::vector<Symbol>* getTrackingPath() const { return trackingPath; }
+    const std::vector<Symbol>* getTrackingPath() const {
+        return provenance ? &provenance->path : nullptr;
+    }
 
     /**
      * Set the tracking path prefix for this attrset.
      */
-    void setTrackingPath(EvalMemory & mem, std::vector<Symbol> path);
+    void setTrackingPath(std::vector<Symbol> path);
 
     class iterator
     {

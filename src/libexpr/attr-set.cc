@@ -40,35 +40,34 @@ void Bindings::sort()
 
 void Bindings::initProvenance(EvalMemory & mem)
 {
-    if (!provenanceMap) {
-        provenanceMap = new (mem.allocBytes(sizeof(*provenanceMap)))
-            boost::unordered_flat_map<Symbol, AttrProvenance, std::hash<Symbol>>();
+    if (!provenance) {
+        provenance = new (mem.allocBytes(sizeof(*provenance))) ProvenanceData();
+        mem.hasAnyTrackedBindings = true;
     }
 }
 
 AttrProvenance* Bindings::getProvenance(Symbol name)
 {
-    if (!provenanceMap) return nullptr;
-    auto it = provenanceMap->find(name);
-    return it != provenanceMap->end() ? &it->second : nullptr;
+    if (!provenance) return nullptr;
+    auto it = provenance->map.find(name);
+    return it != provenance->map.end() ? &it->second : nullptr;
 }
 
 const AttrProvenance* Bindings::getProvenance(Symbol name) const
 {
-    if (!provenanceMap) return nullptr;
-    auto it = provenanceMap->find(name);
-    return it != provenanceMap->end() ? &it->second : nullptr;
+    if (!provenance) return nullptr;
+    auto it = provenance->map.find(name);
+    return it != provenance->map.end() ? &it->second : nullptr;
 }
 
 void Bindings::setProvenance(Symbol name, AttrProvenance prov)
 {
-    if (provenanceMap) (*provenanceMap)[name] = std::move(prov);
+    if (provenance) provenance->map[name] = std::move(prov);
 }
 
-void Bindings::setTrackingPath(EvalMemory & mem, std::vector<Symbol> path)
+void Bindings::setTrackingPath(std::vector<Symbol> path)
 {
-    trackingPath = new (mem.allocBytes(sizeof(*trackingPath)))
-        std::vector<Symbol>(std::move(path));
+    if (provenance) provenance->path = std::move(path);
 }
 
 Value & Value::mkAttrs(BindingsBuilder & bindings)

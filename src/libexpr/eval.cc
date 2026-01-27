@@ -382,6 +382,8 @@ void EvalState::recordDependency(const Bindings* bindings, Symbol attr)
     auto& ctx = trackingContextStack.back();
     if (auto* prov = ctx.bindings->getProvenance(ctx.attr)) {
         auto dep = std::make_pair(bindings, attr);
+        // Linear scan is fine here — dependency lists are small (typically <10 entries)
+        // and this path is only taken for tracked attrsets.
         if (std::find(prov->dependencies.begin(), prov->dependencies.end(), dep)
             == prov->dependencies.end()) {
             prov->dependencies.push_back(dep);
@@ -1442,10 +1444,10 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
 
     e->eval(state, env, vTmp);
 
-    // Track info for pushing tracking context for the final attribute
+    bool doTracking = state.mem.hasAnyTrackedBindings;
     Bindings* finalTrackingBindings = nullptr;
     Symbol finalTrackingAttr;
-    size_t pushedContexts = 0;
+    bool pushedContext = false;
 
     try {
         auto dts = state.debugRepl ? makeDebugTraceStacker(
@@ -1482,15 +1484,13 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                 }
             }
 
-            // Record dependency if accessing tracked attrset while in tracking context
-            if (vAttrs->type() == nAttrs && vAttrs->attrs()->isTracked() && state.inTrackingContext()) {
-                state.recordDependency(vAttrs->attrs(), name);
-            }
-
-            // Remember tracking info for the last tracked attrset we access
-            if (vAttrs->type() == nAttrs && vAttrs->attrs()->isTracked()) {
-                finalTrackingBindings = const_cast<Bindings*>(vAttrs->attrs());
-                finalTrackingAttr = name;
+            if (doTracking) [[unlikely]] {
+                if (vAttrs->type() == nAttrs && vAttrs->attrs()->isTracked()) {
+                    if (state.inTrackingContext())
+                        state.recordDependency(vAttrs->attrs(), name);
+                    finalTrackingBindings = const_cast<Bindings*>(vAttrs->attrs());
+                    finalTrackingAttr = name;
+                }
             }
 
             vAttrs = j->value;
@@ -1499,24 +1499,19 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                 state.attrSelects[pos2]++;
         }
 
-        // Push tracking context for the final attribute if it came from a tracked attrset
-        if (finalTrackingBindings) {
+        if (finalTrackingBindings) [[unlikely]] {
             state.pushTrackingContext(finalTrackingBindings, finalTrackingAttr);
-            pushedContexts++;
+            pushedContext = true;
         }
 
         state.forceValue(*vAttrs, (pos2 ? pos2 : this->pos));
 
-        // Pop tracking contexts
-        for (size_t i = 0; i < pushedContexts; i++) {
+        if (pushedContext) [[unlikely]]
             state.popTrackingContext();
-        }
 
     } catch (Error & e) {
-        // Pop tracking contexts on error
-        for (size_t i = 0; i < pushedContexts; i++) {
+        if (pushedContext) [[unlikely]]
             state.popTrackingContext();
-        }
         if (pos2) {
             auto pos2r = state.positions[pos2];
             auto origin = std::get_if<SourcePath>(&pos2r.origin);
@@ -2008,7 +2003,8 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
         return true;
     }();
 
-    bool resultTracked = bindings1.isTracked() || bindings2.isTracked();
+    bool resultTracked = state.mem.hasAnyTrackedBindings
+        && (bindings1.isTracked() || bindings2.isTracked());
 
     if (shouldLayer) {
         auto attrs = state.buildBindings(bindings2.size());
@@ -2016,20 +2012,16 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
 
         std::ranges::copy(bindings2, std::back_inserter(attrs));
 
-        // Initialize provenance for result if either input is tracked
-        if (resultTracked) {
+        if (resultTracked) [[unlikely]] {
             attrs.getBindings()->initProvenance(state.mem);
-            // Copy provenance from base layer (bindings1)
             if (bindings1.isTracked()) {
                 for (auto & attr : bindings1) {
                     if (auto* prov = bindings1.getProvenance(attr.name)) {
-                        // Only copy if not overridden by bindings2
                         if (!bindings2.get(attr.name))
                             attrs.getBindings()->setProvenance(attr.name, *prov);
                     }
                 }
             }
-            // Copy provenance from top layer (bindings2) - this overrides
             if (bindings2.isTracked()) {
                 for (auto & attr : bindings2) {
                     if (auto* prov = bindings2.getProvenance(attr.name)) {
@@ -2047,8 +2039,7 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
 
     auto attrs = state.buildBindings(bindings1.size() + bindings2.size());
 
-    // Initialize provenance for result if either input is tracked
-    if (resultTracked) {
+    if (resultTracked) [[unlikely]] {
         attrs.getBindings()->initProvenance(state.mem);
     }
 
@@ -2060,8 +2051,7 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
     while (i != bindings1.end() && j != bindings2.end()) {
         if (i->name == j->name) {
             attrs.insert(*j);
-            // Provenance from RHS (bindings2) wins
-            if (resultTracked && bindings2.isTracked()) {
+            if (resultTracked && bindings2.isTracked()) [[unlikely]] {
                 if (auto* prov = bindings2.getProvenance(j->name))
                     attrs.getBindings()->setProvenance(j->name, *prov);
             }
@@ -2069,14 +2059,14 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
             ++j;
         } else if (i->name < j->name) {
             attrs.insert(*i);
-            if (resultTracked && bindings1.isTracked()) {
+            if (resultTracked && bindings1.isTracked()) [[unlikely]] {
                 if (auto* prov = bindings1.getProvenance(i->name))
                     attrs.getBindings()->setProvenance(i->name, *prov);
             }
             ++i;
         } else {
             attrs.insert(*j);
-            if (resultTracked && bindings2.isTracked()) {
+            if (resultTracked && bindings2.isTracked()) [[unlikely]] {
                 if (auto* prov = bindings2.getProvenance(j->name))
                     attrs.getBindings()->setProvenance(j->name, *prov);
             }
@@ -2086,7 +2076,7 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
 
     while (i != bindings1.end()) {
         attrs.insert(*i);
-        if (resultTracked && bindings1.isTracked()) {
+        if (resultTracked && bindings1.isTracked()) [[unlikely]] {
             if (auto* prov = bindings1.getProvenance(i->name))
                 attrs.getBindings()->setProvenance(i->name, *prov);
         }
@@ -2095,7 +2085,7 @@ void ExprOpUpdate::eval(EvalState & state, Value & v, Value & v1, Value & v2)
 
     while (j != bindings2.end()) {
         attrs.insert(*j);
-        if (resultTracked && bindings2.isTracked()) {
+        if (resultTracked && bindings2.isTracked()) [[unlikely]] {
             if (auto* prov = bindings2.getProvenance(j->name))
                 attrs.getBindings()->setProvenance(j->name, *prov);
         }

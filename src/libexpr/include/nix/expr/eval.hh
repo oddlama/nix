@@ -336,6 +336,12 @@ public:
         Counter nrListElems;
     };
 
+    /**
+     * Set to true when any Bindings has provenance tracking initialized.
+     * Used as a fast guard to skip all tracking code when no tracked attrsets exist.
+     */
+    bool hasAnyTrackedBindings = false;
+
     EvalMemory();
 
     EvalMemory(const EvalMemory &) = delete;
