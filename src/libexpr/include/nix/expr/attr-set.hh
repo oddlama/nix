@@ -112,6 +112,14 @@ private:
     boost::unordered_flat_map<Symbol, AttrProvenance, std::hash<Symbol>>* provenanceMap = nullptr;
 
     /**
+     * Optional path prefix for this tracked attrset.
+     * When set, dependency serialization uses this to reconstruct
+     * full attribute paths (e.g., ["services" "nginx"] + ["enable"]).
+     * Null for non-tracked or root-level tracked attrsets.
+     */
+    std::vector<Symbol>* trackingPath = nullptr;
+
+    /**
      * Flexible array member of attributes.
      */
     Attr attrs[0];
@@ -163,6 +171,16 @@ public:
      * Set provenance for an attribute.
      */
     void setProvenance(Symbol name, AttrProvenance prov);
+
+    /**
+     * Get the tracking path prefix for this attrset.
+     */
+    const std::vector<Symbol>* getTrackingPath() const { return trackingPath; }
+
+    /**
+     * Set the tracking path prefix for this attrset.
+     */
+    void setTrackingPath(EvalMemory & mem, std::vector<Symbol> path);
 
     class iterator
     {

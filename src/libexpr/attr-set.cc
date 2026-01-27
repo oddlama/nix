@@ -65,6 +65,12 @@ void Bindings::setProvenance(Symbol name, AttrProvenance prov)
     if (provenanceMap) (*provenanceMap)[name] = std::move(prov);
 }
 
+void Bindings::setTrackingPath(EvalMemory & mem, std::vector<Symbol> path)
+{
+    trackingPath = new (mem.allocBytes(sizeof(*trackingPath)))
+        std::vector<Symbol>(std::move(path));
+}
+
 Value & Value::mkAttrs(BindingsBuilder & bindings)
 {
     mkAttrs(bindings.finish());

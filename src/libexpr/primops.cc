@@ -3263,11 +3263,19 @@ static void prim_getAttrProvenance(EvalState & state, const PosIdx pos, Value **
     auto& deps = attrs.alloc(state.symbols.create("dependencies"));
     auto list = state.buildList(prov->dependencies.size());
     for (size_t i = 0; i < prov->dependencies.size(); i++) {
-        auto& [_, depAttr] = prov->dependencies[i];
+        auto& [depBindings, depAttr] = prov->dependencies[i];
         list[i] = state.allocValue();
-        auto inner = state.buildList(1);
-        inner[0] = state.allocValue();
-        inner[0]->mkString(std::string_view(state.symbols[depAttr]), state.mem);
+
+        // Build the full path: trackingPath of the source bindings + the accessed attr
+        auto* srcPath = depBindings ? depBindings->getTrackingPath() : nullptr;
+        size_t prefixLen = srcPath ? srcPath->size() : 0;
+        auto inner = state.buildList(prefixLen + 1);
+        for (size_t j = 0; j < prefixLen; j++) {
+            inner[j] = state.allocValue();
+            inner[j]->mkString(std::string_view(state.symbols[(*srcPath)[j]]), state.mem);
+        }
+        inner[prefixLen] = state.allocValue();
+        inner[prefixLen]->mkString(std::string_view(state.symbols[depAttr]), state.mem);
         list[i]->mkList(inner);
     }
     deps.mkList(list);
@@ -3303,6 +3311,70 @@ static RegisterPrimOp primop_getAttrProvenance({
       ```
     )",
     .fun = prim_getAttrProvenance,
+});
+
+/* Make an existing attrset tracked, enabling provenance tracking.
+   Takes an attrset and an optional list of strings representing
+   the path prefix for this attrset (used to reconstruct full
+   dependency paths). */
+static void prim_makeTracked(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    state.forceAttrs(*args[0], pos, "while evaluating the first argument to builtins.makeTracked");
+
+    auto & inputBindings = *args[0]->attrs();
+
+    // If already tracked, return unchanged
+    if (inputBindings.isTracked()) {
+        v = *args[0];
+        return;
+    }
+
+    auto resultBindings = state.buildBindings(inputBindings.size());
+
+    // Initialize provenance tracking
+    resultBindings.getBindings()->initProvenance(state.mem);
+
+    // Set tracking path if provided (second argument)
+    state.forceList(*args[1], pos, "while evaluating the second argument to builtins.makeTracked");
+    if (args[1]->listSize() > 0) {
+        std::vector<Symbol> path;
+        path.reserve(args[1]->listSize());
+        for (auto elem : args[1]->listView()) {
+            auto s = state.forceStringNoCtx(*elem, pos, "while evaluating a path element in builtins.makeTracked");
+            path.push_back(state.symbols.create(s));
+        }
+        resultBindings.getBindings()->setTrackingPath(state.mem, std::move(path));
+    }
+
+    // Copy all attributes (as thunks to preserve laziness)
+    for (auto & attr : inputBindings) {
+        resultBindings.insert(attr);
+        resultBindings.getBindings()->setProvenance(
+            attr.name,
+            AttrProvenance{attr.pos, {}}
+        );
+    }
+
+    v.mkAttrs(resultBindings.finish());
+}
+
+static RegisterPrimOp primop_makeTracked({
+    .name = "__makeTracked",
+    .args = {"set", "path"},
+    .doc = R"(
+      Convert an attribute set into a tracked attribute set.
+
+      Tracked attrsets record dependency information when their
+      attributes are accessed during evaluation.
+
+      The second argument is a list of strings representing the
+      path prefix of this attrset (e.g., `["services" "nginx"]`),
+      used to reconstruct full attribute paths in dependency info.
+      Pass `[]` for root-level attrsets.
+
+      If the input is already tracked, it is returned unchanged.
+    )",
+    .fun = prim_makeTracked,
 });
 
 static void prim_removeAttrs(EvalState & state, const PosIdx pos, Value ** args, Value & v)
