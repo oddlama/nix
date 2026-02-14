@@ -1065,6 +1065,77 @@ private:
     typedef boost::unordered_flat_map<PosIdx, size_t, std::hash<PosIdx>> AttrSelects;
     AttrSelects attrSelects;
 
+public:
+    /**
+     * Fixpoint dependency tracking types and state.
+     */
+
+    /** Tracking scope ID (0 = not tracked) */
+    using TrackingScopeId = uint64_t;
+
+    /** Attribute path representation for tracking */
+    using TrackingAttrPath = std::vector<Symbol, traceable_allocator<Symbol>>;
+
+    /** A recorded dependency: "accessor" depends on "accessed" */
+    struct DependencyRecord {
+        TrackingAttrPath accessor;
+        TrackingAttrPath accessed;
+    };
+
+    /** Per-scope tracking data */
+    struct TrackingScope {
+        TrackingScopeId id;
+        const Bindings * trackedBindings;
+        std::vector<DependencyRecord, traceable_allocator<DependencyRecord>> deps;
+    };
+
+    /** Current force context: who is being evaluated */
+    struct ForceContext {
+        TrackingScopeId scopeId;
+        TrackingAttrPath originPath;
+    };
+
+    /** Next tracking scope ID to allocate */
+    uint64_t nextTrackingScopeId = 1;
+
+    /** All tracking scopes */
+    std::vector<TrackingScope, traceable_allocator<TrackingScope>> trackingScopes;
+
+    /** Which bindings are tracked (attrset pointer → scope ID) */
+    boost::unordered_flat_map<
+        const Bindings *,
+        TrackingScopeId,
+        std::hash<const Bindings *>,
+        std::equal_to<const Bindings *>,
+        traceable_allocator<std::pair<const Bindings * const, TrackingScopeId>>> trackedBindings;
+
+    /** Lambda origin tracking for lexical scoping (lambda → scope ID + origin path) */
+    boost::unordered_flat_map<
+        const ExprLambda *,
+        std::pair<TrackingScopeId, TrackingAttrPath>,
+        std::hash<const ExprLambda *>,
+        std::equal_to<const ExprLambda *>,
+        traceable_allocator<std::pair<const ExprLambda * const, std::pair<TrackingScopeId, TrackingAttrPath>>>> lambdaOrigins;
+
+    /** Current force context stack (who is being evaluated) */
+    std::vector<ForceContext, traceable_allocator<ForceContext>> forceContextStack;
+
+    /** Mapping from thunk value to its attribute path for tracked attrsets.
+        This enables proper lexical scoping when lambdas access tracked attrs. */
+    boost::unordered_flat_map<
+        const Value *,
+        std::pair<TrackingScopeId, TrackingAttrPath>,
+        std::hash<const Value *>,
+        std::equal_to<const Value *>,
+        traceable_allocator<std::pair<const Value * const, std::pair<TrackingScopeId, TrackingAttrPath>>>> valueOrigins;
+
+    /** Record a dependency in the given scope */
+    void recordDependency(TrackingScopeId scopeId, const TrackingAttrPath & accessor, const TrackingAttrPath & accessed);
+
+    /** Find tracking scope by ID */
+    TrackingScope * findTrackingScope(TrackingScopeId scopeId);
+
+private:
     friend struct ExprOpUpdate;
     friend struct ExprOpConcatLists;
     friend struct ExprVar;
@@ -1076,6 +1147,8 @@ private:
     friend void prim_getAttr(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_match(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_split(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_fixWithTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_getAttrWithTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v);
 
     friend struct Value;
     friend class ListBuilder;

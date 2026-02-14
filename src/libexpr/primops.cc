@@ -3083,7 +3083,22 @@ void prim_getAttr(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto attr = state.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getAttr");
     state.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.getAttr");
-    auto i = state.getAttr(state.symbols.create(attr), args[1]->attrs(), "in the attribute set under consideration");
+    auto name = state.symbols.create(attr);
+    auto i = state.getAttr(name, args[1]->attrs(), "in the attribute set under consideration");
+
+    // Track dependency if accessing a tracked attrset and in force context
+    if (!state.forceContextStack.empty()) {
+        auto trackIt = state.trackedBindings.find(args[1]->attrs());
+        if (trackIt != state.trackedBindings.end()) {
+            auto & ctx = state.forceContextStack.back();
+            if (ctx.scopeId == trackIt->second) {
+                EvalState::TrackingAttrPath accessedPath;
+                accessedPath.push_back(name);
+                state.recordDependency(trackIt->second, ctx.originPath, accessedPath);
+            }
+        }
+    }
+
     // !!! add to stack trace?
     if (state.countCalls && i->pos)
         state.attrSelects[i->pos]++;
@@ -5121,6 +5136,192 @@ static RegisterPrimOp primop_splitVersion({
       [`nix-env -u`](../command-ref/nix-env/upgrade.md).
     )",
     .fun = prim_splitVersion,
+});
+
+/*************************************************************
+ * Dependency Tracking
+ *************************************************************/
+
+/* Create a fixpoint attrset with dependency tracking.
+   This is like `fix` but enables tracking attribute access dependencies. */
+void prim_fixWithTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    // arg 0: function that takes self and returns attrset
+    state.forceFunction(*args[0], pos, "while evaluating the first argument passed to builtins.fixWithTracking");
+
+    // Create new tracking scope
+    EvalState::TrackingScopeId scopeId = state.nextTrackingScopeId++;
+
+    // Allocate "self" value
+    Value * vSelf = state.allocValue();
+
+    // Call f(self) - the self reference creates the fixpoint
+    state.callFunction(*args[0], *vSelf, v, pos);
+
+    // Force result to be an attrset
+    state.forceAttrs(v, pos, "while evaluating the result of fixWithTracking");
+
+    // Complete the fixpoint: make self point to result
+    *vSelf = v;
+
+    // Register for tracking
+    EvalState::TrackingScope scope;
+    scope.id = scopeId;
+    scope.trackedBindings = v.attrs();
+    state.trackingScopes.push_back(std::move(scope));
+    state.trackedBindings[v.attrs()] = scopeId;
+
+    // Register each attribute's value with its path for lexical scoping
+    for (auto & attr : *v.attrs()) {
+        EvalState::TrackingAttrPath path;
+        path.push_back(attr.name);
+        state.valueOrigins[attr.value] = {scopeId, std::move(path)};
+    }
+}
+
+static RegisterPrimOp primop_fixWithTracking({
+    .name = "__fixWithTracking",
+    .args = {"f"},
+    .doc = R"(
+      Like `fix` but enables dependency tracking. Creates a fixpoint of the
+      function *f* (which must return an attribute set) and tracks which
+      attributes access which other attributes during evaluation.
+
+      Use `builtins.getAttrWithTracking` to retrieve values along with their
+      dependency information.
+    )",
+    .fun = prim_fixWithTracking,
+});
+
+/* Helper to build dependency list for output */
+static void buildDependencyList(EvalState & state, EvalState::TrackingScopeId scopeId, Value & v)
+{
+    auto * scope = state.findTrackingScope(scopeId);
+    if (!scope) {
+        v.mkList(state.buildList(0));
+        return;
+    }
+
+    auto list = state.buildList(scope->deps.size());
+    size_t idx = 0;
+    for (auto & dep : scope->deps) {
+        // Each dependency is an attrset { accessor = [...]; accessed = [...]; }
+        auto bindings = state.buildBindings(2);
+
+        // Build accessor path list
+        auto accessorList = state.buildList(dep.accessor.size());
+        for (size_t i = 0; i < dep.accessor.size(); i++) {
+            Value * pathElem = state.allocValue();
+            pathElem->mkString(state.symbols[dep.accessor[i]], state.mem);
+            accessorList[i] = pathElem;
+        }
+        Value * vAccessor = state.allocValue();
+        vAccessor->mkList(accessorList);
+        bindings.insert(state.symbols.create("accessor"), vAccessor);
+
+        // Build accessed path list
+        auto accessedList = state.buildList(dep.accessed.size());
+        for (size_t i = 0; i < dep.accessed.size(); i++) {
+            Value * pathElem = state.allocValue();
+            pathElem->mkString(state.symbols[dep.accessed[i]], state.mem);
+            accessedList[i] = pathElem;
+        }
+        Value * vAccessed = state.allocValue();
+        vAccessed->mkList(accessedList);
+        bindings.insert(state.symbols.create("accessed"), vAccessed);
+
+        Value * vDep = state.allocValue();
+        vDep->mkAttrs(bindings);
+        list[idx++] = vDep;
+    }
+
+    v.mkList(list);
+}
+
+/* Evaluate an attribute path in a tracked attrset and return the value with dependencies. */
+void prim_getAttrWithTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    // arg 0: list of strings (attr path)
+    // arg 1: tracked attrset
+
+    state.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.getAttrWithTracking");
+    state.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.getAttrWithTracking");
+
+    // Parse attr path
+    EvalState::TrackingAttrPath path;
+    for (auto elem : args[0]->listView()) {
+        state.forceStringNoCtx(*elem, pos, "while evaluating a path element passed to builtins.getAttrWithTracking");
+        path.push_back(state.symbols.create(elem->string_view()));
+    }
+
+    // Check tracking
+    auto it = state.trackedBindings.find(args[1]->attrs());
+    if (it == state.trackedBindings.end()) {
+        state.error<EvalError>("attrset is not tracked (not created with fixWithTracking)")
+            .atPos(pos)
+            .debugThrow();
+    }
+    EvalState::TrackingScopeId scopeId = it->second;
+
+    // Push force context for this evaluation
+    EvalState::ForceContext ctx;
+    ctx.scopeId = scopeId;
+    ctx.originPath = path;
+    state.forceContextStack.push_back(std::move(ctx));
+
+    Value * current = args[1];
+    try {
+        // Navigate to attribute
+        for (auto & sym : path) {
+            state.forceAttrs(*current, pos, "while navigating attr path in getAttrWithTracking");
+            auto attr = current->attrs()->get(sym);
+            if (!attr) {
+                state.error<EvalError>("attribute '%s' not found", state.symbols[sym])
+                    .atPos(pos)
+                    .debugThrow();
+            }
+            current = attr->value;
+        }
+
+        // Force the value (this records dependencies)
+        state.forceValue(*current, pos);
+    } catch (...) {
+        state.forceContextStack.pop_back();
+        throw;
+    }
+
+    state.forceContextStack.pop_back();
+
+    // Build result: { value = ...; dependencies = [...]; }
+    auto bindings = state.buildBindings(2);
+    bindings.insert(state.symbols.create("value"), current);
+
+    // Build dependencies list
+    Value * vDeps = state.allocValue();
+    buildDependencyList(state, scopeId, *vDeps);
+    bindings.insert(state.symbols.create("dependencies"), vDeps);
+
+    v.mkAttrs(bindings);
+}
+
+static RegisterPrimOp primop_getAttrWithTracking({
+    .name = "__getAttrWithTracking",
+    .args = {"path", "attrset"},
+    .doc = R"(
+      Evaluate an attribute path in a tracked attrset (created with
+      `builtins.fixWithTracking`) and return both the value and its
+      dependency information.
+
+      *path* is a list of strings representing the attribute path.
+      *attrset* must be a tracked attrset created with `builtins.fixWithTracking`.
+
+      Returns an attrset with:
+      - `value`: the evaluated value at the path
+      - `dependencies`: a list of dependency records, each with:
+        - `accessor`: list of strings representing who accessed
+        - `accessed`: list of strings representing what was accessed
+    )",
+    .fun = prim_getAttrWithTracking,
 });
 
 /*************************************************************

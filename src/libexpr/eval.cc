@@ -364,6 +364,22 @@ EvalState::EvalState(
 
 EvalState::~EvalState() {}
 
+void EvalState::recordDependency(TrackingScopeId scopeId, const TrackingAttrPath & accessor, const TrackingAttrPath & accessed)
+{
+    if (auto * scope = findTrackingScope(scopeId)) {
+        scope->deps.push_back({accessor, accessed});
+    }
+}
+
+EvalState::TrackingScope * EvalState::findTrackingScope(TrackingScopeId scopeId)
+{
+    for (auto & scope : trackingScopes) {
+        if (scope.id == scopeId)
+            return &scope;
+    }
+    return nullptr;
+}
+
 void EvalState::allowPathLegacy(const Path & path)
 {
     if (auto rootFS2 = rootFS.dynamic_pointer_cast<AllowListSourceAccessor>())
@@ -1411,6 +1427,11 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                                          showAttrSelectionPath(state, env, getAttrPath()))
                                    : nullptr;
 
+        // Track the accessed path for dependency tracking
+        EvalState::TrackingAttrPath accessedPath;
+        const Bindings * originalBindings = nullptr;
+        EvalState::TrackingScopeId trackedScopeId = 0;
+
         for (auto & i : getAttrPath()) {
             state.nrLookups++;
             const Attr * j;
@@ -1423,6 +1444,16 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                 }
             } else {
                 state.forceAttrs(*vAttrs, pos, "while selecting an attribute");
+
+                // Check if this is the first attr access on a tracked attrset
+                if (accessedPath.empty()) {
+                    auto trackIt = state.trackedBindings.find(vAttrs->attrs());
+                    if (trackIt != state.trackedBindings.end()) {
+                        originalBindings = vAttrs->attrs();
+                        trackedScopeId = trackIt->second;
+                    }
+                }
+
                 if (!(j = vAttrs->attrs()->get(name))) {
                     StringSet allAttrNames;
                     for (auto & attr : *vAttrs->attrs())
@@ -1435,10 +1466,25 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                         .debugThrow();
                 }
             }
+
+            // Build accessed path
+            if (trackedScopeId != 0) {
+                accessedPath.push_back(name);
+            }
+
             vAttrs = j->value;
             pos2 = j->pos;
             if (state.countCalls)
                 state.attrSelects[pos2]++;
+        }
+
+        // Record dependency if we're accessing a tracked attrset and we're in a force context
+        if (trackedScopeId != 0 && !state.forceContextStack.empty()) {
+            auto & ctx = state.forceContextStack.back();
+            // Only record if same scope (avoid cross-scope pollution)
+            if (ctx.scopeId == trackedScopeId) {
+                state.recordDependency(trackedScopeId, ctx.originPath, accessedPath);
+            }
         }
 
         state.forceValue(*vAttrs, (pos2 ? pos2 : this->pos));
@@ -1498,6 +1544,12 @@ void ExprOpHasAttr::eval(EvalState & state, Env & env, Value & v)
 void ExprLambda::eval(EvalState & state, Env & env, Value & v)
 {
     v.mkLambda(&env, this);
+
+    // If in tracking context, record lambda's origin for lexical scoping
+    if (!state.forceContextStack.empty()) {
+        auto & ctx = state.forceContextStack.back();
+        state.lambdaOrigins[this] = {ctx.scopeId, ctx.originPath};
+    }
 }
 
 void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes, const PosIdx pos)
@@ -1607,6 +1659,17 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
             if (countCalls)
                 incrFunctionCall(&lambda);
 
+            // Check if this lambda has a recorded origin for tracking
+            bool pushedTrackingCtx = false;
+            auto originIt = lambdaOrigins.find(&lambda);
+            if (originIt != lambdaOrigins.end()) {
+                ForceContext ctx;
+                ctx.scopeId = originIt->second.first;
+                ctx.originPath = originIt->second.second;
+                forceContextStack.push_back(std::move(ctx));
+                pushedTrackingCtx = true;
+            }
+
             /* Evaluate the body. */
             try {
                 auto dts = debugRepl
@@ -1620,7 +1683,9 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
                                : nullptr;
 
                 lambda.body->eval(*this, env2, vCur);
+                if (pushedTrackingCtx) forceContextStack.pop_back();
             } catch (Error & e) {
+                if (pushedTrackingCtx) forceContextStack.pop_back();
                 if (loggerSettings.showTrace.get()) {
                     addErrorTrace(
                         e,
