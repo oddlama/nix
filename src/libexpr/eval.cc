@@ -1042,6 +1042,16 @@ Value * Expr::maybeThunk(EvalState & state, Env & env)
 {
     Value * v = state.allocValue();
     mkThunk(*v, env, this);
+
+    // Register thunk with current force context for proper dependency attribution.
+    // This ensures that when function arguments (which are thunks) are later forced,
+    // any attribute accesses are attributed to where the argument was written,
+    // not where it was forced.
+    if (!state.forceContextStack.empty()) {
+        auto & ctx = state.forceContextStack.back();
+        state.valueOrigins[v] = {ctx.scopeId, ctx.originPath};
+    }
+
     return v;
 }
 

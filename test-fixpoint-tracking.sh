@@ -130,8 +130,8 @@ check "List in tracked set" \
     '2'
 
 # Test 14: Multiple functions with lexical scoping
-# Note: self.mult is accessed during add's evaluation (when forcing argument a)
-# So mult -> add, not mult -> result
+# result accesses add and mult (even though mult is passed as an argument to add)
+# add accesses base, mult accesses factor
 check "Multiple function lexical scoping" \
     'builtins.getAttrWithTracking ["result"] (builtins.fixWithTracking (self: {
         add = a: b: self.base + a + b;
@@ -140,12 +140,55 @@ check "Multiple function lexical scoping" \
         factor = 2;
         result = self.add (self.mult 3) 5;
     }))' \
-    '{ dependencies = [ { accessed = [ "add" ]; accessor = [ "result" ]; } { accessed = [ "base" ]; accessor = [ "add" ]; } { accessed = [ "mult" ]; accessor = [ "add" ]; } { accessed = [ "factor" ]; accessor = [ "mult" ]; } ]; value = 21; }'
+    '{ dependencies = [ { accessed = [ "add" ]; accessor = [ "result" ]; } { accessed = [ "base" ]; accessor = [ "add" ]; } { accessed = [ "mult" ]; accessor = [ "result" ]; } { accessed = [ "factor" ]; accessor = [ "mult" ]; } ]; value = 21; }'
 
 # Test 15: Nested function calls (curried)
 check "Curried function" \
     'builtins.getAttrWithTracking ["z"] (builtins.fixWithTracking (self: { f = a: b: self.c + a + b; x = self.f 1; z = self.x 2; c = 10; }))' \
     '{ dependencies = [ { accessed = [ "x" ]; accessor = [ "z" ]; } { accessed = [ "f" ]; accessor = [ "x" ]; } { accessed = [ "c" ]; accessor = [ "f" ]; } ]; value = 13; }'
+
+echo ""
+echo "=== withDependencyTracking Tests (for module system) ==="
+echo ""
+
+# Test 16: Basic withDependencyTracking
+check "withDependencyTracking basic" \
+    'let config = { a = 1; b = config.a + 1; }; in builtins.withDependencyTracking ["b"] config config.b' \
+    '{ dependencies = [ { accessed = [ "b" ]; accessor = [ "b" ]; } { accessed = [ "a" ]; accessor = [ "b" ]; } ]; value = 2; }'
+
+# Test 17: withDependencyTracking transitive deps all attributed to original accessor
+check "withDependencyTracking transitive" \
+    'let config = { a = 1; b = config.a; c = config.b; }; in builtins.withDependencyTracking ["c"] config config.c' \
+    '{ dependencies = [ { accessed = [ "c" ]; accessor = [ "c" ]; } { accessed = [ "b" ]; accessor = [ "c" ]; } { accessed = [ "a" ]; accessor = [ "c" ]; } ]; value = 1; }'
+
+# Test 18: withDependencyTracking with nested attrs (NixOS-like pattern)
+check "withDependencyTracking nested attrs" \
+    'let config = { services.nginx.enable = config.services.webapp.enable; services.webapp.enable = true; }; in builtins.withDependencyTracking ["services" "nginx" "enable"] config config.services.nginx.enable' \
+    '{ dependencies = [ { accessed = [ "services" "nginx" "enable" ]; accessor = [ "services" "nginx" "enable" ]; } { accessed = [ "services" "webapp" "enable" ]; accessor = [ "services" "nginx" "enable" ]; } ]; value = true; }'
+
+# Test 19: withDependencyTracking with conditionals
+check "withDependencyTracking conditional" \
+    'let config = { enabled = true; value = if config.enabled then 42 else 0; }; in builtins.withDependencyTracking ["value"] config config.value' \
+    '{ dependencies = [ { accessed = [ "value" ]; accessor = [ "value" ]; } { accessed = [ "enabled" ]; accessor = [ "value" ]; } ]; value = 42; }'
+
+# Test 20: withDependencyTracking complex NixOS-like scenario
+check "withDependencyTracking NixOS-like" \
+    'let config = {
+        services.nginx.enable = config.services.webapp.enable;
+        services.webapp.enable = true;
+        services.postgresql.enable = config.services.webapp.enable;
+        networking.firewall.allowedTCPPorts = if config.services.nginx.enable then [80 443] else [];
+    }; in (builtins.withDependencyTracking ["networking" "firewall" "allowedTCPPorts"] config config.networking.firewall.allowedTCPPorts).value' \
+    '[ 80 443 ]'
+
+# Test 21: withDependencyTracking captures all transitive deps
+check_contains "withDependencyTracking all deps captured" \
+    'let config = {
+        services.nginx.enable = config.services.webapp.enable;
+        services.webapp.enable = true;
+        networking.firewall.allowedTCPPorts = if config.services.nginx.enable then [80] else [];
+    }; in builtins.withDependencyTracking ["networking" "firewall" "allowedTCPPorts"] config config.networking.firewall.allowedTCPPorts' \
+    '{ accessed = [ "services" "webapp" "enable" ]; accessor = [ "networking" "firewall" "allowedTCPPorts" ]; }'
 
 echo ""
 echo "=== Results ==="

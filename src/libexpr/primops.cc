@@ -5324,6 +5324,112 @@ static RegisterPrimOp primop_getAttrWithTracking({
     .fun = prim_getAttrWithTracking,
 });
 
+/* Evaluate an expression while tracking accesses to a target attrset.
+   This is the fundamental dependency tracking primitive that works with
+   any attrset, not just fixpoints.
+
+   Unlike fixWithTracking, this does NOT register thunks with their origin paths.
+   This means ALL accesses during evaluation are attributed to the provided accessor,
+   not to intermediate thunks. This is the behavior needed for module system tracking. */
+void prim_withDependencyTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    // arg 0: accessor path (list of strings) - who is accessing
+    // arg 1: target attrset - what to track accesses on
+    // arg 2: expression to evaluate
+
+    state.forceList(*args[0], pos, "while evaluating the first argument (accessor) passed to builtins.withDependencyTracking");
+    state.forceAttrs(*args[1], pos, "while evaluating the second argument (target) passed to builtins.withDependencyTracking");
+
+    // Parse accessor path
+    EvalState::TrackingAttrPath accessorPath;
+    for (auto elem : args[0]->listView()) {
+        state.forceStringNoCtx(*elem, pos, "while evaluating an accessor path element");
+        accessorPath.push_back(state.symbols.create(elem->string_view()));
+    }
+
+    // Create a new tracking scope for this evaluation
+    EvalState::TrackingScopeId scopeId = state.nextTrackingScopeId++;
+
+    // Register the target attrset for tracking
+    EvalState::TrackingScope scope;
+    scope.id = scopeId;
+    scope.trackedBindings = args[1]->attrs();
+    state.trackingScopes.push_back(std::move(scope));
+    state.trackedBindings[args[1]->attrs()] = scopeId;
+
+    // NOTE: We intentionally do NOT register values in valueOrigins here.
+    // This means intermediate thunks won't push their own contexts, and ALL
+    // accesses will be attributed to our accessor. This is the key difference
+    // from fixWithTracking, and is needed for module system tracking where we
+    // want to know "option X depends on option Y" directly.
+
+    // Push force context with accessor
+    EvalState::ForceContext ctx;
+    ctx.scopeId = scopeId;
+    ctx.originPath = accessorPath;
+    state.forceContextStack.push_back(std::move(ctx));
+
+    Value * result = args[2];
+    try {
+        // Force/evaluate the expression (this records dependencies)
+        state.forceValue(*result, pos);
+    } catch (...) {
+        state.forceContextStack.pop_back();
+        // Clean up tracking state
+        state.trackedBindings.erase(args[1]->attrs());
+        throw;
+    }
+
+    state.forceContextStack.pop_back();
+
+    // Build result: { value = ...; dependencies = [...]; }
+    auto bindings = state.buildBindings(2);
+    bindings.insert(state.symbols.create("value"), result);
+
+    // Build dependencies list
+    Value * vDeps = state.allocValue();
+    buildDependencyList(state, scopeId, *vDeps);
+    bindings.insert(state.symbols.create("dependencies"), vDeps);
+
+    v.mkAttrs(bindings);
+
+    // Clean up tracking state
+    state.trackedBindings.erase(args[1]->attrs());
+}
+
+static RegisterPrimOp primop_withDependencyTracking({
+    .name = "__withDependencyTracking",
+    .args = {"accessor", "target", "expr"},
+    .doc = R"(
+      Evaluate an expression while tracking accesses to a target attrset.
+      This is the fundamental dependency tracking primitive.
+
+      *accessor* is a list of strings representing who is accessing (e.g., an option path).
+      *target* is the attrset whose attribute accesses should be tracked.
+      *expr* is the expression to evaluate.
+
+      Returns an attrset with:
+      - `value`: the evaluated result
+      - `dependencies`: a list of dependency records, each with:
+        - `accessor`: the accessor path (same as input for direct accesses,
+          or the path of a thunk that was forced for indirect accesses)
+        - `accessed`: list of strings representing what was accessed in target
+
+      This primitive works with any attrset, not just fixpoints. It enables
+      dependency tracking for the NixOS module system and other lazy evaluation
+      patterns.
+
+      Example:
+      ```nix
+      let
+        config = { a = 1; b = config.a + 1; c = config.b + 1; };
+      in
+        builtins.withDependencyTracking ["c"] config config.c
+      ```
+    )",
+    .fun = prim_withDependencyTracking,
+});
+
 /*************************************************************
  * Primop registration
  *************************************************************/
