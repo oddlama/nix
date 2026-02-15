@@ -148,47 +148,61 @@ check "Curried function" \
     '{ dependencies = [ { accessed = [ "x" ]; accessor = [ "z" ]; } { accessed = [ "f" ]; accessor = [ "x" ]; } { accessed = [ "c" ]; accessor = [ "f" ]; } ]; value = 13; }'
 
 echo ""
-echo "=== withDependencyTracking Tests (for module system) ==="
+echo "=== withDependencyTracking Tests (tree-structured dependencies) ==="
 echo ""
 
-# Test 16: Basic withDependencyTracking
+# Test 16: Basic withDependencyTracking (new 2-arg API)
 check "withDependencyTracking basic" \
-    'let config = { a = 1; b = config.a + 1; }; in builtins.withDependencyTracking ["b"] config config.b' \
-    '{ dependencies = [ { accessed = [ "b" ]; accessor = [ "b" ]; } { accessed = [ "a" ]; accessor = [ "b" ]; } ]; value = 2; }'
+    'let config = { a = 1; b = config.a + 1; }; in builtins.withDependencyTracking ["b"] config' \
+    '{ dependencies = [ { accessed = [ "a" ]; accessor = [ "b" ]; } ]; value = 2; }'
 
-# Test 17: withDependencyTracking transitive deps all attributed to original accessor
-check "withDependencyTracking transitive" \
-    'let config = { a = 1; b = config.a; c = config.b; }; in builtins.withDependencyTracking ["c"] config config.c' \
-    '{ dependencies = [ { accessed = [ "c" ]; accessor = [ "c" ]; } { accessed = [ "b" ]; accessor = [ "c" ]; } { accessed = [ "a" ]; accessor = [ "c" ]; } ]; value = 1; }'
+# Test 17: withDependencyTracking transitive deps - now tree-structured!
+# c -> b -> a becomes: c accesses b, b accesses a (order may vary)
+check_contains "withDependencyTracking transitive tree (c->b)" \
+    'let config = { a = 1; b = config.a; c = config.b; }; in builtins.withDependencyTracking ["c"] config' \
+    '{ accessed = [ "b" ]; accessor = [ "c" ]; }'
+
+check_contains "withDependencyTracking transitive tree (b->a)" \
+    'let config = { a = 1; b = config.a; c = config.b; }; in builtins.withDependencyTracking ["c"] config' \
+    '{ accessed = [ "a" ]; accessor = [ "b" ]; }'
 
 # Test 18: withDependencyTracking with nested attrs (NixOS-like pattern)
 check "withDependencyTracking nested attrs" \
-    'let config = { services.nginx.enable = config.services.webapp.enable; services.webapp.enable = true; }; in builtins.withDependencyTracking ["services" "nginx" "enable"] config config.services.nginx.enable' \
-    '{ dependencies = [ { accessed = [ "services" "nginx" "enable" ]; accessor = [ "services" "nginx" "enable" ]; } { accessed = [ "services" "webapp" "enable" ]; accessor = [ "services" "nginx" "enable" ]; } ]; value = true; }'
+    'let config = { services.nginx.enable = config.services.webapp.enable; services.webapp.enable = true; }; in builtins.withDependencyTracking ["services" "nginx" "enable"] config' \
+    '{ dependencies = [ { accessed = [ "services" "webapp" "enable" ]; accessor = [ "services" "nginx" "enable" ]; } ]; value = true; }'
 
 # Test 19: withDependencyTracking with conditionals
 check "withDependencyTracking conditional" \
-    'let config = { enabled = true; value = if config.enabled then 42 else 0; }; in builtins.withDependencyTracking ["value"] config config.value' \
-    '{ dependencies = [ { accessed = [ "value" ]; accessor = [ "value" ]; } { accessed = [ "enabled" ]; accessor = [ "value" ]; } ]; value = 42; }'
+    'let config = { enabled = true; value = if config.enabled then 42 else 0; }; in builtins.withDependencyTracking ["value"] config' \
+    '{ dependencies = [ { accessed = [ "enabled" ]; accessor = [ "value" ]; } ]; value = 42; }'
 
-# Test 20: withDependencyTracking complex NixOS-like scenario
-check "withDependencyTracking NixOS-like" \
+# Test 20: withDependencyTracking complex NixOS-like scenario - value check
+check "withDependencyTracking NixOS-like value" \
     'let config = {
         services.nginx.enable = config.services.webapp.enable;
         services.webapp.enable = true;
         services.postgresql.enable = config.services.webapp.enable;
         networking.firewall.allowedTCPPorts = if config.services.nginx.enable then [80 443] else [];
-    }; in (builtins.withDependencyTracking ["networking" "firewall" "allowedTCPPorts"] config config.networking.firewall.allowedTCPPorts).value' \
+    }; in (builtins.withDependencyTracking ["networking" "firewall" "allowedTCPPorts"] config).value' \
     '[ 80 443 ]'
 
-# Test 21: withDependencyTracking captures all transitive deps
-check_contains "withDependencyTracking all deps captured" \
+# Test 21: withDependencyTracking captures tree-structured deps
+# firewall -> nginx.enable -> webapp.enable
+check_contains "withDependencyTracking tree deps (nginx)" \
     'let config = {
         services.nginx.enable = config.services.webapp.enable;
         services.webapp.enable = true;
         networking.firewall.allowedTCPPorts = if config.services.nginx.enable then [80] else [];
-    }; in builtins.withDependencyTracking ["networking" "firewall" "allowedTCPPorts"] config config.networking.firewall.allowedTCPPorts' \
-    '{ accessed = [ "services" "webapp" "enable" ]; accessor = [ "networking" "firewall" "allowedTCPPorts" ]; }'
+    }; in builtins.withDependencyTracking ["networking" "firewall" "allowedTCPPorts"] config' \
+    '{ accessed = [ "services" "nginx" "enable" ]; accessor = [ "networking" "firewall" "allowedTCPPorts" ]; }'
+
+check_contains "withDependencyTracking tree deps (webapp)" \
+    'let config = {
+        services.nginx.enable = config.services.webapp.enable;
+        services.webapp.enable = true;
+        networking.firewall.allowedTCPPorts = if config.services.nginx.enable then [80] else [];
+    }; in builtins.withDependencyTracking ["networking" "firewall" "allowedTCPPorts"] config' \
+    '{ accessed = [ "services" "webapp" "enable" ]; accessor = [ "services" "nginx" "enable" ]; }'
 
 echo ""
 echo "=== Results ==="

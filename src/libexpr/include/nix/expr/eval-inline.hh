@@ -87,15 +87,19 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
 {
     // Only check for tracking context if value needs forcing
     if (v.isThunk()) {
-        // Check if this value has a registered origin for tracking
+        // Check if this value has a registered origin for tracking.
+        // Skip context push during registration phase (when skipTrackingContextPush is set)
+        // to avoid premature dependency recording.
         bool pushedTrackingCtx = false;
-        auto originIt = valueOrigins.find(&v);
-        if (originIt != valueOrigins.end()) {
-            ForceContext ctx;
-            ctx.scopeId = originIt->second.first;
-            ctx.originPath = originIt->second.second;
-            forceContextStack.push_back(std::move(ctx));
-            pushedTrackingCtx = true;
+        if (!skipTrackingContextPush) {
+            auto originIt = valueOrigins.find(&v);
+            if (originIt != valueOrigins.end()) {
+                ForceContext ctx;
+                ctx.scopeId = originIt->second.first;
+                ctx.originPath = originIt->second.second;
+                forceContextStack.push_back(std::move(ctx));
+                pushedTrackingCtx = true;
+            }
         }
 
         Env * env = v.thunk().env;

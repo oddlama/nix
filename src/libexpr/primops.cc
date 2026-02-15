@@ -5324,27 +5324,89 @@ static RegisterPrimOp primop_getAttrWithTracking({
     .fun = prim_getAttrWithTracking,
 });
 
-/* Evaluate an expression while tracking accesses to a target attrset.
-   This is the fundamental dependency tracking primitive that works with
-   any attrset, not just fixpoints.
+/* Helper to recursively register all attribute values in valueOrigins.
+   This enables each nested attribute to push its own force context when evaluated,
+   giving us a proper dependency tree instead of flat attribution.
 
-   Unlike fixWithTracking, this does NOT register thunks with their origin paths.
-   This means ALL accesses during evaluation are attributed to the provided accessor,
-   not to intermediate thunks. This is the behavior needed for module system tracking. */
+   We traverse nested attrsets and register all values with their full paths.
+   For nested attrsets (which may be thunks), we force them to get the structure
+   but this is safe because we're only reading the attrset structure, not evaluating
+   the leaf thunks. */
+static void registerAttrValuesRecursive(
+    EvalState & state,
+    Value & v,
+    EvalState::TrackingScopeId scopeId,
+    EvalState::TrackingAttrPath & currentPath,
+    const PosIdx pos,
+    bool isRoot = true)
+{
+    // For non-root values, we need to check if it's an attrset to recurse.
+    // The challenge is that nested attrsets like { nginx.enable = x; } are
+    // initially thunks (ExprAttrs wrapped in mkThunk).
+    //
+    // We can safely force ExprAttrs thunks because they only create the
+    // attrset structure - they don't force the leaf values.
+    // BUT we must NOT force other thunks (like leaf expressions) because
+    // forcing caches them, preventing later dependency tracking.
+    //
+    // Solution: Check if the thunk's expression is an ExprAttrs. If so,
+    // force it to reveal the nested structure. Otherwise, don't force.
+    if (!isRoot && v.isThunk()) {
+        Expr * expr = v.thunk().expr;
+        // Only force if this is an ExprAttrs (nested attrset)
+        if (dynamic_cast<ExprAttrs *>(expr) || dynamic_cast<ExprLet *>(expr)) {
+            bool prevSkip = state.skipTrackingContextPush;
+            state.skipTrackingContextPush = true;
+            try {
+                state.forceValue(v, pos);
+            } catch (...) {
+                state.skipTrackingContextPush = prevSkip;
+                return;
+            }
+            state.skipTrackingContextPush = prevSkip;
+        } else {
+            // Not an attrset thunk - don't force, just register and return
+            return;
+        }
+    }
+
+    if (v.type() != nAttrs) return;
+
+    for (auto & attr : *v.attrs()) {
+        // Build path for this attribute
+        currentPath.push_back(attr.name);
+
+        // Register this value with its FULL path
+        state.valueOrigins[attr.value] = {scopeId, EvalState::TrackingAttrPath(currentPath)};
+
+        // Recurse into nested attrsets.
+        registerAttrValuesRecursive(state, *attr.value, scopeId, currentPath, pos, false);
+
+        currentPath.pop_back();
+    }
+}
+
+/* Evaluate an attribute path on a target attrset while tracking all dependencies.
+   This returns the full dependency TREE, where each intermediate value that is
+   forced records its own dependencies.
+
+   Unlike the flat tracking mode, this registers all attribute values in valueOrigins,
+   so when intermediate thunks are forced, they push their own force context.
+   This gives us proper attribution: if A depends on B which depends on C,
+   we see A->B and B->C, not A->B and A->C. */
 void prim_withDependencyTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    // arg 0: accessor path (list of strings) - who is accessing
+    // arg 0: path to evaluate (list of strings)
     // arg 1: target attrset - what to track accesses on
-    // arg 2: expression to evaluate
 
-    state.forceList(*args[0], pos, "while evaluating the first argument (accessor) passed to builtins.withDependencyTracking");
+    state.forceList(*args[0], pos, "while evaluating the first argument (path) passed to builtins.withDependencyTracking");
     state.forceAttrs(*args[1], pos, "while evaluating the second argument (target) passed to builtins.withDependencyTracking");
 
-    // Parse accessor path
-    EvalState::TrackingAttrPath accessorPath;
+    // Parse the path to evaluate
+    EvalState::TrackingAttrPath targetPath;
     for (auto elem : args[0]->listView()) {
-        state.forceStringNoCtx(*elem, pos, "while evaluating an accessor path element");
-        accessorPath.push_back(state.symbols.create(elem->string_view()));
+        state.forceStringNoCtx(*elem, pos, "while evaluating a path element");
+        targetPath.push_back(state.symbols.create(elem->string_view()));
     }
 
     // Create a new tracking scope for this evaluation
@@ -5357,25 +5419,83 @@ void prim_withDependencyTracking(EvalState & state, const PosIdx pos, Value ** a
     state.trackingScopes.push_back(std::move(scope));
     state.trackedBindings[args[1]->attrs()] = scopeId;
 
-    // NOTE: We intentionally do NOT register values in valueOrigins here.
-    // This means intermediate thunks won't push their own contexts, and ALL
-    // accesses will be attributed to our accessor. This is the key difference
-    // from fixWithTracking, and is needed for module system tracking where we
-    // want to know "option X depends on option Y" directly.
+    // Register all attribute values recursively in valueOrigins.
+    // This is the key to getting tree-structured dependencies:
+    // when intermediate values are forced, they push their own context.
+    EvalState::TrackingAttrPath emptyPath;
+    registerAttrValuesRecursive(state, *args[1], scopeId, emptyPath, pos);
 
-    // Push force context with accessor
+    // Navigate to the target path and get the value
+    Value * current = args[1];
+    for (size_t i = 0; i < targetPath.size(); i++) {
+        state.forceAttrs(*current, pos, "while navigating to tracked path");
+        auto attr = current->attrs()->get(targetPath[i]);
+        if (!attr) {
+            state.trackedBindings.erase(args[1]->attrs());
+            state.error<EvalError>("attribute '%s' not found in tracked attrset", state.symbols[targetPath[i]]).debugThrow();
+        }
+        current = attr->value;
+    }
+
+    // Push force context with the target path as accessor
     EvalState::ForceContext ctx;
     ctx.scopeId = scopeId;
-    ctx.originPath = accessorPath;
+    ctx.originPath = targetPath;
     state.forceContextStack.push_back(std::move(ctx));
 
-    Value * result = args[2];
+    // Helper to recursively force while keeping tracking active.
+    // We need to dynamically register nested values as we discover them,
+    // since they may not have been registered during initial registration
+    // (e.g., option value thunks in the module system).
+    //
+    // Key insight: We must register nested values BEFORE forcing them,
+    // so when they're forced, the correct context is pushed.
+    //
+    // We limit recursion depth to avoid stack overflow on deeply nested structures.
+    // For tracking purposes, we only need to go deep enough to capture the
+    // immediate nested values that might have dependencies.
+    constexpr size_t MAX_TRACKING_DEPTH = 50;
+    std::function<void(Value &, EvalState::TrackingAttrPath &, size_t)> forceWithTracking;
+    std::set<const Value *> seen;
+    forceWithTracking = [&](Value & v, EvalState::TrackingAttrPath & path, size_t depth) {
+        // Prevent infinite recursion
+        if (depth > MAX_TRACKING_DEPTH || !seen.insert(&v).second)
+            return;
+
+        // If this is a thunk that's not yet registered, register it now
+        // so that when it's forced, the correct context is pushed.
+        bool wasThunk = v.isThunk();
+        if (wasThunk) {
+            auto it = state.valueOrigins.find(&v);
+            if (it == state.valueOrigins.end()) {
+                state.valueOrigins[&v] = {scopeId, EvalState::TrackingAttrPath(path)};
+            }
+        }
+
+        // Now force - if registered, forceValue will push the correct context
+        state.forceValue(v, pos);
+
+        if (v.type() == nAttrs) {
+            for (auto & attr : *v.attrs()) {
+                path.push_back(attr.name);
+                forceWithTracking(*attr.value, path, depth + 1);
+                path.pop_back();
+            }
+        } else if (v.isList()) {
+            for (auto v2 : v.listView()) {
+                // For lists, we don't have a name-based path, just force deeply
+                EvalState::TrackingAttrPath listPath = path;
+                forceWithTracking(*v2, listPath, depth + 1);
+            }
+        }
+    };
+
     try {
-        // Force/evaluate the expression (this records dependencies)
-        state.forceValue(*result, pos);
+        // Force/evaluate the value recursively (this records dependencies with proper tree structure)
+        EvalState::TrackingAttrPath currentPath = targetPath;
+        forceWithTracking(*current, currentPath, 0);
     } catch (...) {
         state.forceContextStack.pop_back();
-        // Clean up tracking state
         state.trackedBindings.erase(args[1]->attrs());
         throw;
     }
@@ -5384,7 +5504,7 @@ void prim_withDependencyTracking(EvalState & state, const PosIdx pos, Value ** a
 
     // Build result: { value = ...; dependencies = [...]; }
     auto bindings = state.buildBindings(2);
-    bindings.insert(state.symbols.create("value"), result);
+    bindings.insert(state.symbols.create("value"), current);
 
     // Build dependencies list
     Value * vDeps = state.allocValue();
@@ -5399,32 +5519,41 @@ void prim_withDependencyTracking(EvalState & state, const PosIdx pos, Value ** a
 
 static RegisterPrimOp primop_withDependencyTracking({
     .name = "__withDependencyTracking",
-    .args = {"accessor", "target", "expr"},
+    .args = {"path", "attrset"},
     .doc = R"(
-      Evaluate an expression while tracking accesses to a target attrset.
-      This is the fundamental dependency tracking primitive.
+      Evaluate an attribute path on an attrset while tracking all dependencies.
+      Returns the value along with a complete dependency tree.
 
-      *accessor* is a list of strings representing who is accessing (e.g., an option path).
-      *target* is the attrset whose attribute accesses should be tracked.
-      *expr* is the expression to evaluate.
+      *path* is a list of strings representing the attribute path to evaluate.
+      *attrset* is the attrset to track accesses on.
 
       Returns an attrset with:
       - `value`: the evaluated result
       - `dependencies`: a list of dependency records, each with:
-        - `accessor`: the accessor path (same as input for direct accesses,
-          or the path of a thunk that was forced for indirect accesses)
-        - `accessed`: list of strings representing what was accessed in target
+        - `accessor`: the path of the attribute that caused the access
+        - `accessed`: the path of the attribute that was accessed
 
-      This primitive works with any attrset, not just fixpoints. It enables
-      dependency tracking for the NixOS module system and other lazy evaluation
-      patterns.
+      Unlike flat tracking, this gives you a proper dependency TREE:
+      if `a` depends on `b` which depends on `c`, you get both `a->b` and `b->c`,
+      not `a->b` and `a->c`.
 
       Example:
       ```nix
       let
-        config = { a = 1; b = config.a + 1; c = config.b + 1; };
+        config = {
+          services.nginx.enable = config.services.webapp.enable;
+          services.webapp.enable = true;
+          networking.firewall.ports = if config.services.nginx.enable then [80] else [];
+        };
       in
-        builtins.withDependencyTracking ["c"] config config.c
+        builtins.withDependencyTracking ["networking" "firewall" "ports"] config
+      # Returns:
+      # { value = [80];
+      #   dependencies = [
+      #     { accessor = ["networking" "firewall" "ports"]; accessed = ["services" "nginx" "enable"]; }
+      #     { accessor = ["services" "nginx" "enable"]; accessed = ["services" "webapp" "enable"]; }
+      #   ];
+      # }
       ```
     )",
     .fun = prim_withDependencyTracking,

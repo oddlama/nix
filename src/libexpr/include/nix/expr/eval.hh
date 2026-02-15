@@ -1120,6 +1120,10 @@ public:
     /** Current force context stack (who is being evaluated) */
     std::vector<ForceContext, traceable_allocator<ForceContext>> forceContextStack;
 
+    /** When true, skip pushing force context during value forcing.
+        Used during registration to avoid premature dependency recording. */
+    bool skipTrackingContextPush = false;
+
     /** Mapping from thunk value to its attribute path for tracked attrsets.
         This enables proper lexical scoping when lambdas access tracked attrs. */
     boost::unordered_flat_map<
