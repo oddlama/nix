@@ -11,6 +11,7 @@ let
     ;
 
   # Create a minimal module system with tracking enabled
+  # This gives us access to rawConfig via _dependencyTracking
   minimalSystem = lib.evalModules {
     trackDependencies = true;
     modules = [
@@ -118,23 +119,26 @@ let
       )
 
       # ============================================================
-      # MODULE 4: Derived output (pure fixpoint magic)
+      # MODULE 4: Derived outputs
       # ============================================================
       (
         { config, lib, ... }:
         {
-          options.systemReport = mkOption {
-            type = types.attrs;
-            default = { };
+          options.activeServices = mkOption {
+            type = types.listOf types.str;
+            description = "List of active service names";
           };
 
-          config.systemReport = {
-            # List of active services
-            activeServices = lib.attrNames (lib.filterAttrs (_: s: s.enable) config.services);
-
-            # Users and their enabled services (no self-reference)
-            userServiceList = lib.mapAttrs (_: user: user.enabledServices) config.users;
+          options.serviceCount = mkOption {
+            type = types.int;
+            description = "Number of services";
           };
+
+          # activeServices depends on services
+          config.activeServices = lib.attrNames (lib.filterAttrs (_: s: s.enable) config.services);
+
+          # serviceCount depends on activeServices
+          config.serviceCount = lib.length config.activeServices;
         }
       )
 
@@ -175,8 +179,42 @@ let
     ];
   };
 
-  # Track a specific config path
-  trackPath = path: minimalSystem._dependencyTracking.getOptionDependencies path;
+  # ============================================================
+  # NEW APPROACH: Using thunk-embedded origins
+  # ============================================================
+
+  # Use rawConfig to get the same Bindings* that modules access internally.
+  # Note: trackDependencies=true enables the OLD tracking approach which uses
+  # valueOrigins. This can interfere with our new thunk-embedded origins approach.
+  # For now, we accept this limitation - the dependencies may include some
+  # duplicates or incorrect attributions from the old approach.
+  config = minimalSystem._dependencyTracking.rawConfig;
+
+  # Register config for tracking - returns a scope ID
+  scopeId = builtins.trackAttrset config;
+
+  # Helper to tag and track a specific path
+  # This tags the thunk at 'path' with its origin, then forces it
+  trackPath = path:
+    let
+      # getAttrTagged: get attribute at path and tag it with that path as origin
+      # When forced, any accesses to config.* will be recorded with accessor=path
+      taggedValue = builtins.getAttrTagged scopeId path config;
+
+      # CRITICAL: Force the value BEFORE getting dependencies!
+      # Due to lazy evaluation, dependencies are only recorded when values are forced.
+      # We use seq to create a dependency chain: force taggedValue, then get deps.
+      allDeps = builtins.seq (builtins.deepSeq taggedValue null) (builtins.getDependencies scopeId);
+
+      # Filter to only deps from this accessor
+      pathStr = builtins.concatStringsSep "." path;
+      myDeps = builtins.filter (d:
+        builtins.concatStringsSep "." d.accessor == pathStr
+      ) allDeps;
+    in {
+      value = taggedValue;
+      dependencies = myDeps;
+    };
 
   # Format dependencies for JSON output
   formatForJson =
@@ -290,23 +328,78 @@ let
       }
     '';
 
-  reportTracked = trackPath [
-    "systemReport"
-  ];
+  # Track various paths
+  servicesTracked = trackPath [ "services" ];
+  activeServicesTracked = trackPath [ "activeServices" ];
+  serviceCountTracked = trackPath [ "serviceCount" ];
+
+  # Get ALL dependencies from the scope (after forcing all tracked values)
+  allDependencies =
+    builtins.seq servicesTracked.value
+    (builtins.seq activeServicesTracked.value
+    (builtins.seq serviceCountTracked.value
+    (builtins.getDependencies scopeId)));
+
 in
 {
   # JSON output with dependency information
-  json = builtins.toJSON (formatForJson reportTracked);
+  json = builtins.toJSON (formatForJson activeServicesTracked);
 
   # Graphviz DOT format
-  graphviz = generateGraphviz reportTracked;
+  graphviz = generateGraphviz activeServicesTracked;
 
   # Summary statistics
   summary = {
     totalDependencies = builtins.length (
       builtins.filter (
         d: builtins.concatStringsSep "." d.accessor != builtins.concatStringsSep "." d.accessed
-      ) reportTracked.dependencies
+      ) allDependencies
     );
+  };
+
+  # New approach outputs - demonstrate the raw API
+  newApproach = {
+    # The scope ID used for tracking
+    inherit scopeId;
+
+    # Raw dependencies list from getDependencies
+    rawDependencies = allDependencies;
+
+    # Dependencies by path
+    byPath = {
+      services = servicesTracked.dependencies;
+      activeServices = activeServicesTracked.dependencies;
+      serviceCount = serviceCountTracked.dependencies;
+    };
+
+    # The actual values (to verify they're correct)
+    values = {
+      services = servicesTracked.value;
+      activeServices = activeServicesTracked.value;
+      serviceCount = serviceCountTracked.value;
+    };
+  };
+
+  # Direct test of the thunk-embedded origins approach
+  # This demonstrates the API without module system complexity
+  directTest = let
+    # Simple fixpoint with explicit self references
+    testConfig = let self = {
+      a = 1;
+      b = self.a + 1;
+      c = self.b + self.a;
+    }; in self;
+
+    testScopeId = builtins.trackAttrset testConfig;
+    bValue = builtins.getAttrTagged testScopeId ["b"] testConfig;
+    cValue = builtins.getAttrTagged testScopeId ["c"] testConfig;
+
+    # CRITICAL: Force values BEFORE getting dependencies (lazy evaluation!)
+    testDeps = builtins.seq bValue (builtins.seq cValue (builtins.getDependencies testScopeId));
+  in {
+    scopeId = testScopeId;
+    values = { inherit (testConfig) a; b = bValue; c = cValue; };
+    dependencies = testDeps;
+    # Expected: b depends on a, c depends on a and b
   };
 }

@@ -5562,6 +5562,9 @@ static RegisterPrimOp primop_withDependencyTracking({
 /* Register an attrset for tracking and return its scope ID.
    This is the first step in the thunk-embedded origins approach:
    mark an attrset (like `config`) so that accesses to it are tracked. */
+// Debug flag for dependency tracking
+static bool debugTracking = std::getenv("NIX_DEBUG_TRACKING") != nullptr;
+
 void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     state.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.trackAttrset");
@@ -5570,6 +5573,10 @@ void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value
     auto it = state.trackedBindings.find(args[0]->attrs());
     if (it != state.trackedBindings.end()) {
         // Already tracked, return existing scope ID
+        if (debugTracking) {
+            std::cerr << "[TRACK] trackAttrset: already tracked, returning scopeId=" << it->second
+                      << " (Bindings*=" << (void*)args[0]->attrs() << ")\n";
+        }
         v.mkInt(it->second);
         return;
     }
@@ -5581,6 +5588,11 @@ void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value
     scope.trackedBindings = args[0]->attrs();
     state.trackingScopes.push_back(std::move(scope));
     state.trackedBindings[args[0]->attrs()] = scopeId;
+
+    if (debugTracking) {
+        std::cerr << "[TRACK] trackAttrset: NEW scopeId=" << scopeId
+                  << " (Bindings*=" << (void*)args[0]->attrs() << ")\n";
+    }
 
     v.mkInt(scopeId);
 }
@@ -5745,6 +5757,16 @@ void prim_getAttrTagged(EvalState & state, const PosIdx pos, Value ** args, Valu
             .debugThrow();
     }
 
+    // Debug: print path being tracked
+    if (debugTracking) {
+        std::cerr << "[TRACK] getAttrTagged: scopeId=" << scopeId.value << " path=[";
+        for (size_t i = 0; i < path.size(); i++) {
+            if (i > 0) std::cerr << ".";
+            std::cerr << state.symbols[path[i]];
+        }
+        std::cerr << "] attrset Bindings*=" << (void*)args[2]->attrs() << "\n";
+    }
+
     // Navigate to the attribute
     Value * current = args[2];
     for (size_t i = 0; i < path.size(); i++) {
@@ -5761,17 +5783,15 @@ void prim_getAttrTagged(EvalState & state, const PosIdx pos, Value ** args, Valu
     // Tag the VALUE IN THE ATTRSET (current points to the actual stored value)
     // This is crucial: we tag the ORIGINAL pointer, not a copy
     if (current->isThunk() || current->isApp()) {
+        if (debugTracking) {
+            std::cerr << "[TRACK] getAttrTagged: tagging thunk/app at Value*=" << (void*)current << "\n";
+        }
         state.tagThunkOrigin(current, scopeId.value, path);
+    } else {
+        if (debugTracking) {
+            std::cerr << "[TRACK] getAttrTagged: value already forced (type=" << current->type() << "), not a thunk\n";
+        }
     }
-
-    // Return the value (this will copy it, but the ORIGINAL is now tagged)
-    // When this copy is forced, it won't hit our tag - but we don't care,
-    // because the ORIGINAL in the attrset is tagged, and that's what matters
-    // for nested evaluations that access config.
-    //
-    // Actually, we need the RETURNED value to be tagged. The problem is
-    // that Nix copies values. Let's try a different approach: force it here
-    // while we have the context set up.
 
     // Push the force context manually
     EvalState::ForceContext ctx;
@@ -5779,9 +5799,21 @@ void prim_getAttrTagged(EvalState & state, const PosIdx pos, Value ** args, Valu
     ctx.originPath = path;
     state.forceContextStack.push_back(std::move(ctx));
 
+    if (debugTracking) {
+        std::cerr << "[TRACK] getAttrTagged: pushed forceContext for [";
+        for (size_t i = 0; i < path.size(); i++) {
+            if (i > 0) std::cerr << ".";
+            std::cerr << state.symbols[path[i]];
+        }
+        std::cerr << "], stack size=" << state.forceContextStack.size() << "\n";
+    }
+
     try {
         // Force the value - this will record any dependencies
         state.forceValue(*current, pos);
+        if (debugTracking) {
+            std::cerr << "[TRACK] getAttrTagged: after forceValue, stack size=" << state.forceContextStack.size() << "\n";
+        }
     } catch (...) {
         state.forceContextStack.pop_back();
         throw;

@@ -364,8 +364,34 @@ EvalState::EvalState(
 
 EvalState::~EvalState() {}
 
+// Debug flag for dependency tracking (defined in primops.cc)
+static bool debugTrackingEval = std::getenv("NIX_DEBUG_TRACKING") != nullptr;
+
 void EvalState::recordDependency(TrackingScopeId scopeId, const TrackingAttrPath & accessor, const TrackingAttrPath & accessed)
 {
+    if (debugTrackingEval) {
+        std::cerr << "[TRACK] recordDependency: scopeId=" << scopeId << " accessor=[";
+        for (size_t i = 0; i < accessor.size(); i++) {
+            if (i > 0) std::cerr << ".";
+            std::cerr << symbols[accessor[i]];
+        }
+        std::cerr << "] -> accessed=[";
+        for (size_t i = 0; i < accessed.size(); i++) {
+            if (i > 0) std::cerr << ".";
+            std::cerr << symbols[accessed[i]];
+        }
+        std::cerr << "] (stack depth=" << forceContextStack.size();
+        if (!forceContextStack.empty()) {
+            std::cerr << ", top=[";
+            auto & top = forceContextStack.back();
+            for (size_t i = 0; i < top.originPath.size(); i++) {
+                if (i > 0) std::cerr << ".";
+                std::cerr << symbols[top.originPath[i]];
+            }
+            std::cerr << "]";
+        }
+        std::cerr << ")\n";
+    }
     if (auto * scope = findTrackingScope(scopeId)) {
         scope->deps.push_back({accessor, accessed});
     }
