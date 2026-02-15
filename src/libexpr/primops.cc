@@ -5559,6 +5559,280 @@ static RegisterPrimOp primop_withDependencyTracking({
     .fun = prim_withDependencyTracking,
 });
 
+/* Register an attrset for tracking and return its scope ID.
+   This is the first step in the thunk-embedded origins approach:
+   mark an attrset (like `config`) so that accesses to it are tracked. */
+void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    state.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.trackAttrset");
+
+    // Check if already tracked
+    auto it = state.trackedBindings.find(args[0]->attrs());
+    if (it != state.trackedBindings.end()) {
+        // Already tracked, return existing scope ID
+        v.mkInt(it->second);
+        return;
+    }
+
+    // Create new tracking scope
+    EvalState::TrackingScopeId scopeId = state.nextTrackingScopeId++;
+    EvalState::TrackingScope scope;
+    scope.id = scopeId;
+    scope.trackedBindings = args[0]->attrs();
+    state.trackingScopes.push_back(std::move(scope));
+    state.trackedBindings[args[0]->attrs()] = scopeId;
+
+    v.mkInt(scopeId);
+}
+
+static RegisterPrimOp primop_trackAttrset({
+    .name = "__trackAttrset",
+    .args = {"attrset"},
+    .doc = R"(
+      Register an attribute set for dependency tracking and return its scope ID.
+
+      This is the foundation of the thunk-embedded origins approach to dependency
+      tracking. After registering an attrset (like `config` in the NixOS module
+      system), any attribute accesses on it will be recorded when they occur
+      during evaluation of thunks that have been tagged with `tagThunkOrigin`.
+
+      Returns an integer scope ID that should be passed to `tagThunkOrigin` and
+      `getDependencies`.
+
+      Example:
+      ```nix
+      let
+        config = { a = 1; b = config.a + 1; };
+        scopeId = builtins.trackAttrset config;
+        # Now tag thunks and evaluate to capture dependencies
+      in ...
+      ```
+    )",
+    .fun = prim_trackAttrset,
+});
+
+/* Tag a thunk with its origin path for dependency tracking.
+   When this thunk is later forced, it will push its origin as the accessor context,
+   so any attribute accesses during evaluation are attributed to this origin. */
+void prim_tagThunkOrigin(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    // arg 0: scope ID (integer)
+    // arg 1: origin path (list of strings)
+    // arg 2: thunk value to tag
+
+    auto scopeId = state.forceInt(*args[0], pos, "while evaluating the first argument (scopeId) passed to builtins.tagThunkOrigin");
+
+    state.forceList(*args[1], pos, "while evaluating the second argument (path) passed to builtins.tagThunkOrigin");
+
+    // Parse origin path
+    EvalState::TrackingAttrPath path;
+    for (auto elem : args[1]->listView()) {
+        state.forceStringNoCtx(*elem, pos, "while evaluating a path element in builtins.tagThunkOrigin");
+        path.push_back(state.symbols.create(elem->string_view()));
+    }
+
+    // Don't force args[2] - we want to keep it as a thunk!
+    Value * thunk = args[2];
+
+    // Copy the value to the output first
+    v = *thunk;
+
+    // Tag the OUTPUT value (v), not the input (thunk)!
+    // This is crucial because the caller will use &v, not thunk
+    if (v.isThunk()) {
+        state.tagThunkOrigin(&v, scopeId.value, path);
+    }
+    // Also handle apps (partial application)
+    else if (v.isApp()) {
+        // For apps, we still tag them - when forceValue handles them,
+        // it calls callFunction, and we'll need to track that too
+        state.tagThunkOrigin(&v, scopeId.value, path);
+    }
+}
+
+static RegisterPrimOp primop_tagThunkOrigin({
+    .name = "__tagThunkOrigin",
+    .args = {"scopeId", "path", "thunk"},
+    .doc = R"(
+      Tag a thunk value with its origin path for dependency tracking.
+
+      When the tagged thunk is later forced (evaluated), it will automatically
+      push its origin path as the "accessor" context. Any attribute accesses
+      on tracked attrsets during that evaluation will be recorded as dependencies
+      of this origin.
+
+      This is the key to thunk-embedded origins: the accessor is determined at
+      thunk creation time (when this function is called), not at force time.
+      This solves the evaluation order problem where the same thunk might be
+      forced by different accessors.
+
+      Arguments:
+      - scopeId: The tracking scope ID returned by `trackAttrset`
+      - path: A list of strings representing the origin path (e.g., ["services" "nginx" "enable"])
+      - thunk: The thunk value to tag (MUST be unevaluated)
+
+      Returns the thunk unchanged (does not force it).
+
+      Example:
+      ```nix
+      let
+        config = { ... };
+        scopeId = builtins.trackAttrset config;
+        taggedValue = builtins.tagThunkOrigin scopeId ["myOption"] config.myOption;
+        # When taggedValue is forced, any accesses to config.* will be recorded
+        # with accessor = ["myOption"]
+      in taggedValue
+      ```
+    )",
+    .fun = prim_tagThunkOrigin,
+});
+
+/* Get the recorded dependencies for a tracking scope. */
+void prim_getDependencies(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto scopeId = state.forceInt(*args[0], pos, "while evaluating the argument passed to builtins.getDependencies");
+
+    buildDependencyList(state, scopeId.value, v);
+}
+
+static RegisterPrimOp primop_getDependencies({
+    .name = "__getDependencies",
+    .args = {"scopeId"},
+    .doc = R"(
+      Get all recorded dependencies for a tracking scope.
+
+      Returns a list of dependency records, where each record is an attrset with:
+      - `accessor`: list of strings representing the path that caused the access
+      - `accessed`: list of strings representing the path that was accessed
+
+      Example:
+      ```nix
+      let
+        config = { a = 1; b = config.a + 1; };
+        scopeId = builtins.trackAttrset config;
+        # Tag and force thunks to record dependencies
+        _ = builtins.seq (builtins.tagThunkOrigin scopeId ["b"] config.b) null;
+      in builtins.getDependencies scopeId
+      # Returns: [ { accessor = ["b"]; accessed = ["a"]; } ]
+      ```
+    )",
+    .fun = prim_getDependencies,
+});
+
+/* Tag and return an attribute from a tracked attrset.
+   This combines getAttr, tag, and return in one operation to preserve pointer identity.
+   When the returned value is forced, it will record dependencies correctly. */
+void prim_getAttrTagged(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    // arg 0: scope ID (integer)
+    // arg 1: attribute path (list of strings)
+    // arg 2: attrset
+
+    auto scopeId = state.forceInt(*args[0], pos, "while evaluating the first argument (scopeId) passed to builtins.getAttrTagged");
+    state.forceList(*args[1], pos, "while evaluating the second argument (path) passed to builtins.getAttrTagged");
+    state.forceAttrs(*args[2], pos, "while evaluating the third argument (attrset) passed to builtins.getAttrTagged");
+
+    // Parse the attribute path
+    EvalState::TrackingAttrPath path;
+    for (auto elem : args[1]->listView()) {
+        state.forceStringNoCtx(*elem, pos, "while evaluating a path element in builtins.getAttrTagged");
+        path.push_back(state.symbols.create(elem->string_view()));
+    }
+
+    if (path.empty()) {
+        state.error<EvalError>("empty attribute path")
+            .atPos(pos)
+            .debugThrow();
+    }
+
+    // Navigate to the attribute
+    Value * current = args[2];
+    for (size_t i = 0; i < path.size(); i++) {
+        state.forceAttrs(*current, pos, "while navigating attribute path in builtins.getAttrTagged");
+        auto attr = current->attrs()->get(path[i]);
+        if (!attr) {
+            state.error<EvalError>("attribute '%s' missing", state.symbols[path[i]])
+                .atPos(pos)
+                .debugThrow();
+        }
+        current = attr->value;
+    }
+
+    // Tag the VALUE IN THE ATTRSET (current points to the actual stored value)
+    // This is crucial: we tag the ORIGINAL pointer, not a copy
+    if (current->isThunk() || current->isApp()) {
+        state.tagThunkOrigin(current, scopeId.value, path);
+    }
+
+    // Return the value (this will copy it, but the ORIGINAL is now tagged)
+    // When this copy is forced, it won't hit our tag - but we don't care,
+    // because the ORIGINAL in the attrset is tagged, and that's what matters
+    // for nested evaluations that access config.
+    //
+    // Actually, we need the RETURNED value to be tagged. The problem is
+    // that Nix copies values. Let's try a different approach: force it here
+    // while we have the context set up.
+
+    // Push the force context manually
+    EvalState::ForceContext ctx;
+    ctx.scopeId = scopeId.value;
+    ctx.originPath = path;
+    state.forceContextStack.push_back(std::move(ctx));
+
+    try {
+        // Force the value - this will record any dependencies
+        state.forceValue(*current, pos);
+    } catch (...) {
+        state.forceContextStack.pop_back();
+        throw;
+    }
+
+    state.forceContextStack.pop_back();
+
+    // Return the forced value
+    v = *current;
+}
+
+static RegisterPrimOp primop_getAttrTagged({
+    .name = "__getAttrTagged",
+    .args = {"scopeId", "path", "attrset"},
+    .doc = R"(
+      Access and evaluate an attribute from a tracked attrset, recording dependencies.
+
+      This is the primary way to use thunk-embedded origins for dependency tracking.
+      It combines several steps:
+      1. Navigate to the attribute path
+      2. Push the path as the current accessor context
+      3. Force the value (recording any dependencies)
+      4. Pop the context and return the value
+
+      Arguments:
+      - scopeId: The tracking scope ID returned by `trackAttrset`
+      - path: A list of strings representing the attribute path to access
+      - attrset: The tracked attrset to access
+
+      Example:
+      ```nix
+      let
+        config = let self = { a = 1; b = self.a + 1; c = self.b + self.a; }; in self;
+        scopeId = builtins.trackAttrset config;
+        # Evaluate config.b with tracking
+        bValue = builtins.getAttrTagged scopeId ["b"] config;
+        # Evaluate config.c with tracking
+        cValue = builtins.getAttrTagged scopeId ["c"] config;
+      in {
+        b = bValue;  # 2
+        c = cValue;  # 3
+        deps = builtins.getDependencies scopeId;
+        # deps = [ { accessor = ["b"]; accessed = ["a"]; }
+        #          { accessor = ["c"]; accessed = ["b"]; }
+        #          { accessor = ["c"]; accessed = ["a"]; } ]
+      }
+      ```
+    )",
+    .fun = prim_getAttrTagged,
+});
+
 /*************************************************************
  * Primop registration
  *************************************************************/

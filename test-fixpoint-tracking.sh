@@ -205,6 +205,54 @@ check_contains "withDependencyTracking tree deps (webapp)" \
     '{ accessed = [ "services" "webapp" "enable" ]; accessor = [ "services" "nginx" "enable" ]; }'
 
 echo ""
+echo "=== Thunk-Embedded Origins Tests (new primitives) ==="
+echo ""
+
+# Test 22: Basic getAttrTagged
+# Note: attrset attrs are evaluated in alphabetical order, so we use attribute
+# names that ensure 'theValue' (t) is evaluated before 'zDeps' (z)
+check "getAttrTagged basic" \
+    'let
+        config = let self = { a = 1; b = self.a + 1; }; in self;
+        scopeId = builtins.trackAttrset config;
+        bValue = builtins.getAttrTagged scopeId ["b"] config;
+    in { theValue = bValue; zDeps = builtins.getDependencies scopeId; }' \
+    '{ theValue = 2; zDeps = [ { accessed = [ "a" ]; accessor = [ "b" ]; } ]; }'
+
+# Test 23: getAttrTagged with nested path
+check "getAttrTagged nested path" \
+    'let
+        config = let self = { services.nginx.enable = self.services.webapp.enable; services.webapp.enable = true; }; in self;
+        scopeId = builtins.trackAttrset config;
+        nginxEnable = builtins.getAttrTagged scopeId ["services" "nginx" "enable"] config;
+    in { theValue = nginxEnable; zDeps = builtins.getDependencies scopeId; }' \
+    '{ theValue = true; zDeps = [ { accessed = [ "services" "webapp" "enable" ]; accessor = [ "services" "nginx" "enable" ]; } ]; }'
+
+# Test 24: Multiple getAttrTagged calls build up dependencies
+check "getAttrTagged multiple calls" \
+    'let
+        config = let self = { a = 1; b = self.a + 1; c = self.b + self.a; }; in self;
+        scopeId = builtins.trackAttrset config;
+        b = builtins.getAttrTagged scopeId ["b"] config;
+        c = builtins.getAttrTagged scopeId ["c"] config;
+    in { b = b; c = c; zDepCount = builtins.length (builtins.getDependencies scopeId); }' \
+    '{ b = 2; c = 3; zDepCount = 3; }'
+
+# Test 25: trackAttrset returns same scopeId for same attrset
+check "trackAttrset idempotent" \
+    'let
+        config = { a = 1; };
+        s1 = builtins.trackAttrset config;
+        s2 = builtins.trackAttrset config;
+    in s1 == s2' \
+    'true'
+
+# Test 26: getDependencies on untracked scope returns empty
+check "getDependencies empty for new scope" \
+    'builtins.getDependencies 99999' \
+    '[ ]'
+
+echo ""
 echo "=== Results ==="
 echo -e "${GREEN}Passed: $PASS${NC}"
 echo -e "${RED}Failed: $FAIL${NC}"

@@ -1089,10 +1089,17 @@ public:
         std::vector<DependencyRecord, traceable_allocator<DependencyRecord>> deps;
     };
 
-    /** Current force context: who is being evaluated */
+    /** Force context: who is being evaluated (the accessor) */
     struct ForceContext {
         TrackingScopeId scopeId;
         TrackingAttrPath originPath;
+    };
+
+    /** Thunk origin: embedded in thunks to identify their origin path.
+        When a thunk with an origin is forced, it pushes its origin as the accessor context. */
+    struct ThunkOrigin {
+        TrackingScopeId scopeId;
+        TrackingAttrPath * path;  // heap-allocated, managed by GC
     };
 
     /** Next tracking scope ID to allocate */
@@ -1109,6 +1116,39 @@ public:
         std::equal_to<const Bindings *>,
         traceable_allocator<std::pair<const Bindings * const, TrackingScopeId>>> trackedBindings;
 
+    /** Thunk origin tracking - maps thunk Value* to their origin path.
+        This is the key to thunk-embedded origins: when a thunk is forced,
+        we check this map and push the origin as accessor context.
+        Unlike valueOrigins, this is checked FIRST in forceValue and takes
+        precedence, enabling the new tracking approach to work alongside
+        the existing approach. */
+    boost::unordered_flat_map<
+        const Value *,
+        ThunkOrigin,
+        std::hash<const Value *>,
+        std::equal_to<const Value *>,
+        traceable_allocator<std::pair<const Value * const, ThunkOrigin>>> thunkOrigins;
+
+    /** Current force context stack (who is being evaluated).
+        When a thunk with registered origin is forced, it pushes its origin here.
+        When attribute access occurs on a tracked attrset, we record
+        {accessor from stack, accessed path} as a dependency. */
+    std::vector<ForceContext, traceable_allocator<ForceContext>> forceContextStack;
+
+    /** When true, skip pushing force context during value forcing.
+        Used during registration to avoid premature dependency recording. */
+    bool skipTrackingContextPush = false;
+
+    /** Mapping from thunk value to its attribute path for tracked attrsets.
+        This enables proper lexical scoping when lambdas access tracked attrs.
+        Note: thunkOrigins takes precedence over this when both are present. */
+    boost::unordered_flat_map<
+        const Value *,
+        std::pair<TrackingScopeId, TrackingAttrPath>,
+        std::hash<const Value *>,
+        std::equal_to<const Value *>,
+        traceable_allocator<std::pair<const Value * const, std::pair<TrackingScopeId, TrackingAttrPath>>>> valueOrigins;
+
     /** Lambda origin tracking for lexical scoping (lambda → scope ID + origin path) */
     boost::unordered_flat_map<
         const ExprLambda *,
@@ -1117,27 +1157,18 @@ public:
         std::equal_to<const ExprLambda *>,
         traceable_allocator<std::pair<const ExprLambda * const, std::pair<TrackingScopeId, TrackingAttrPath>>>> lambdaOrigins;
 
-    /** Current force context stack (who is being evaluated) */
-    std::vector<ForceContext, traceable_allocator<ForceContext>> forceContextStack;
-
-    /** When true, skip pushing force context during value forcing.
-        Used during registration to avoid premature dependency recording. */
-    bool skipTrackingContextPush = false;
-
-    /** Mapping from thunk value to its attribute path for tracked attrsets.
-        This enables proper lexical scoping when lambdas access tracked attrs. */
-    boost::unordered_flat_map<
-        const Value *,
-        std::pair<TrackingScopeId, TrackingAttrPath>,
-        std::hash<const Value *>,
-        std::equal_to<const Value *>,
-        traceable_allocator<std::pair<const Value * const, std::pair<TrackingScopeId, TrackingAttrPath>>>> valueOrigins;
-
     /** Record a dependency in the given scope */
     void recordDependency(TrackingScopeId scopeId, const TrackingAttrPath & accessor, const TrackingAttrPath & accessed);
 
     /** Find tracking scope by ID */
     TrackingScope * findTrackingScope(TrackingScopeId scopeId);
+
+    /** Tag a thunk with its origin path for dependency tracking.
+        When this thunk is later forced, it will push its origin as accessor context. */
+    void tagThunkOrigin(Value * thunk, TrackingScopeId scopeId, const TrackingAttrPath & path);
+
+    /** Get the origin of a thunk, if it has one */
+    ThunkOrigin * getThunkOrigin(const Value * thunk);
 
 private:
     friend struct ExprOpUpdate;
@@ -1152,6 +1183,9 @@ private:
     friend void prim_match(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_split(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_fixWithTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_tagThunkOrigin(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_getDependencies(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_getAttrWithTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v);
 
     friend struct Value;

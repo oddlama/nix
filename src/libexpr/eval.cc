@@ -380,6 +380,22 @@ EvalState::TrackingScope * EvalState::findTrackingScope(TrackingScopeId scopeId)
     return nullptr;
 }
 
+void EvalState::tagThunkOrigin(Value * thunk, TrackingScopeId scopeId, const TrackingAttrPath & path)
+{
+    // Allocate a copy of the path on the heap (GC-managed)
+    auto * pathCopy = new (mem.allocBytes(sizeof(TrackingAttrPath))) TrackingAttrPath(path);
+    thunkOrigins[thunk] = ThunkOrigin{scopeId, pathCopy};
+}
+
+EvalState::ThunkOrigin * EvalState::getThunkOrigin(const Value * thunk)
+{
+    auto it = thunkOrigins.find(thunk);
+    if (it != thunkOrigins.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
 void EvalState::allowPathLegacy(const Path & path)
 {
     if (auto rootFS2 = rootFS.dynamic_pointer_cast<AllowListSourceAccessor>())

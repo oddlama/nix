@@ -87,11 +87,23 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
 {
     // Only check for tracking context if value needs forcing
     if (v.isThunk()) {
-        // Check if this value has a registered origin for tracking.
-        // Skip context push during registration phase (when skipTrackingContextPush is set)
-        // to avoid premature dependency recording.
+        // Check if this thunk has an embedded origin for tracking (new approach).
+        // If so, push the origin as the accessor context so any attribute
+        // accesses during evaluation are recorded with the correct accessor.
+        // This takes precedence over valueOrigins.
         bool pushedTrackingCtx = false;
-        if (!skipTrackingContextPush) {
+        auto * origin = getThunkOrigin(&v);
+        if (origin && origin->path) {
+            ForceContext ctx;
+            ctx.scopeId = origin->scopeId;
+            ctx.originPath = *origin->path;
+            forceContextStack.push_back(std::move(ctx));
+            pushedTrackingCtx = true;
+        }
+
+        // Fall back to valueOrigins for existing tracking primitives
+        // (fixWithTracking, withDependencyTracking, etc.)
+        if (!pushedTrackingCtx && !skipTrackingContextPush) {
             auto originIt = valueOrigins.find(&v);
             if (originIt != valueOrigins.end()) {
                 ForceContext ctx;
