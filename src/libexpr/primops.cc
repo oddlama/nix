@@ -5267,6 +5267,118 @@ static RegisterPrimOp primop_trackAttrset({
     .fun = prim_trackAttrset,
 });
 
+/* Create a tracking scope without associating it with an attrset yet.
+   This allows creating the scope ID before the attrset (e.g., config) exists,
+   breaking circular dependencies in the module system. */
+void prim_createTrackingScope(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    // Create new tracking scope without any associated attrset
+    EvalState::TrackingScopeId scopeId = state.nextTrackingScopeId++;
+    EvalState::TrackingScope scope;
+    scope.id = scopeId;
+    scope.trackedBindings = nullptr;  // Will be set later by registerTrackedAttrset
+    state.trackingScopes.push_back(std::move(scope));
+
+    if (debugTracking) {
+        std::cerr << "[TRACK] createTrackingScope: NEW scopeId=" << scopeId << " (no attrset yet)\n";
+    }
+
+    v.mkInt(scopeId);
+}
+
+static RegisterPrimOp primop_createTrackingScope({
+    .name = "__createTrackingScope",
+    .args = {},
+    .doc = R"(
+      Create a new dependency tracking scope and return its scope ID.
+
+      Unlike `trackAttrset`, this does not require an attrset upfront. Use this
+      when you need the scope ID before the attrset exists (e.g., in the NixOS
+      module system where `config` depends on option values that need to be
+      tagged with the scope ID).
+
+      After creating the scope, use `registerTrackedAttrset` to associate an
+      attrset with it, and `tagThunkOrigin` to tag thunks.
+
+      Example:
+      ```nix
+      let
+        scopeId = builtins.createTrackingScope;
+        # Use scopeId to tag thunks...
+        config = { ... };  # config can now reference tagged values
+        _ = builtins.registerTrackedAttrset scopeId config;
+      in ...
+      ```
+    )",
+    .fun = prim_createTrackingScope,
+});
+
+/* Register an attrset with an existing tracking scope.
+   This completes the two-phase tracking setup started by createTrackingScope. */
+void prim_registerTrackedAttrset(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto scopeId = state.forceInt(*args[0], pos, "while evaluating the first argument (scopeId) passed to builtins.registerTrackedAttrset");
+    state.forceAttrs(*args[1], pos, "while evaluating the second argument (attrset) passed to builtins.registerTrackedAttrset");
+
+    auto scopeIdVal = static_cast<EvalState::TrackingScopeId>(scopeId.value);
+
+    // Find the scope
+    auto * scope = state.findTrackingScope(scopeIdVal);
+    if (!scope) {
+        state.error<EvalError>("invalid tracking scope ID %1%", scopeIdVal).atPos(pos).debugThrow();
+    }
+
+    // Check if this attrset is already registered with a different scope
+    auto it = state.trackedBindings.find(args[1]->attrs());
+    if (it != state.trackedBindings.end() && it->second != scopeIdVal) {
+        // Already tracked by different scope - this is fine, just warn in debug
+        if (debugTracking) {
+            std::cerr << "[TRACK] registerTrackedAttrset: attrset already tracked by scopeId=" << it->second
+                      << ", ignoring registration for scopeId=" << scopeIdVal << "\n";
+        }
+    } else {
+        // Register the attrset with this scope
+        scope->trackedBindings = args[1]->attrs();
+        state.trackedBindings[args[1]->attrs()] = scopeIdVal;
+
+        if (debugTracking) {
+            std::cerr << "[TRACK] registerTrackedAttrset: scopeId=" << scopeIdVal
+                      << " -> Bindings*=" << (void*)args[1]->attrs() << "\n";
+        }
+    }
+
+    // Return the scope ID for convenience
+    v.mkInt(scopeIdVal);
+}
+
+static RegisterPrimOp primop_registerTrackedAttrset({
+    .name = "__registerTrackedAttrset",
+    .args = {"scopeId", "attrset"},
+    .doc = R"(
+      Register an attribute set with an existing tracking scope.
+
+      This is the second step in the two-phase tracking setup. First create a
+      scope with `createTrackingScope`, then use this function to associate
+      an attrset with it.
+
+      Arguments:
+      - scopeId: The scope ID returned by `createTrackingScope`
+      - attrset: The attribute set to track (e.g., `config`)
+
+      Returns the scope ID.
+
+      Example:
+      ```nix
+      let
+        scopeId = builtins.createTrackingScope;
+        config = evalModulesInternal scopeId modules;
+        _ = builtins.registerTrackedAttrset scopeId config;
+      in config
+      ```
+    )",
+    .fun = prim_registerTrackedAttrset,
+});
+
 /* Tag a thunk with its origin path for dependency tracking.
    When this thunk is later forced, it will push its origin as the accessor context,
    so any attribute accesses during evaluation are attributed to this origin. */
@@ -5293,17 +5405,12 @@ void prim_tagThunkOrigin(EvalState & state, const PosIdx pos, Value ** args, Val
     // Copy the value to the output first
     v = *thunk;
 
-    // Tag the OUTPUT value (v), not the input (thunk)!
-    // This is crucial because the caller will use &v, not thunk
+    // Tag based on the thunk's (env, expr) - this survives Value copies
     if (v.isThunk()) {
         state.tagThunkOrigin(&v, scopeId.value, path);
     }
-    // Also handle apps (partial application)
-    else if (v.isApp()) {
-        // For apps, we still tag them - when forceValue handles them,
-        // it calls callFunction, and we'll need to track that too
-        state.tagThunkOrigin(&v, scopeId.value, path);
-    }
+    // Note: If the value is already forced or is an App, we can't tag it with (env, expr).
+    // The caller should ensure they're passing an unevaluated thunk.
 }
 
 static RegisterPrimOp primop_tagThunkOrigin({

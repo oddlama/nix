@@ -1116,15 +1116,24 @@ public:
         std::equal_to<const Bindings *>,
         traceable_allocator<std::pair<const Bindings * const, TrackingScopeId>>> trackedBindings;
 
-    /** Thunk origin tracking - maps thunk Value* to their origin path.
+    /** Thunk origin tracking - maps (Env*, Expr*) pairs to their origin path.
+        We key on the thunk's internal (env, expr) pair rather than Value* because
+        Values get copied around during evaluation, but the (env, expr) contents
+        are stable identifiers for the thunk.
         This is the key to thunk-embedded origins: when a thunk is forced,
         we check this map and push the origin as accessor context. */
+    using ThunkKey = std::pair<const Env *, const Expr *>;
+    struct ThunkKeyHash {
+        std::size_t operator()(const ThunkKey & k) const {
+            return std::hash<const void *>()(k.first) ^ (std::hash<const void *>()(k.second) << 1);
+        }
+    };
     boost::unordered_flat_map<
-        const Value *,
+        ThunkKey,
         ThunkOrigin,
-        std::hash<const Value *>,
-        std::equal_to<const Value *>,
-        traceable_allocator<std::pair<const Value * const, ThunkOrigin>>> thunkOrigins;
+        ThunkKeyHash,
+        std::equal_to<ThunkKey>,
+        traceable_allocator<std::pair<const ThunkKey, ThunkOrigin>>> thunkOrigins;
 
     /** Current force context stack (who is being evaluated).
         When a thunk with registered origin is forced, it pushes its origin here.
@@ -1159,6 +1168,8 @@ private:
     friend void prim_match(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_split(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_createTrackingScope(EvalState & state, const PosIdx pos, Value ** args, Value & v);
+    friend void prim_registerTrackedAttrset(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_tagThunkOrigin(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_getDependencies(EvalState & state, const PosIdx pos, Value ** args, Value & v);
 

@@ -364,8 +364,8 @@ EvalState::EvalState(
 
 EvalState::~EvalState() {}
 
-// Debug flag for dependency tracking (defined in primops.cc)
-static bool debugTrackingEval = std::getenv("NIX_DEBUG_TRACKING") != nullptr;
+// Debug flag for dependency tracking (used in eval-inline.hh too)
+bool debugTrackingEval = std::getenv("NIX_DEBUG_TRACKING") != nullptr;
 
 void EvalState::recordDependency(TrackingScopeId scopeId, const TrackingAttrPath & accessor, const TrackingAttrPath & accessed)
 {
@@ -408,16 +408,50 @@ EvalState::TrackingScope * EvalState::findTrackingScope(TrackingScopeId scopeId)
 
 void EvalState::tagThunkOrigin(Value * thunk, TrackingScopeId scopeId, const TrackingAttrPath & path)
 {
+    // Only tag actual thunks (with env and expr)
+    if (!thunk->isThunk()) {
+        if (debugTrackingEval) {
+            std::cerr << "[TRACK] tagThunkOrigin: skipping non-thunk (type=" << thunk->type() << ")\n";
+        }
+        return;
+    }
+
+    // Key on (env, expr) which survives Value copies
+    auto key = ThunkKey{thunk->thunk().env, thunk->thunk().expr};
+
     // Allocate a copy of the path on the heap (GC-managed)
     auto * pathCopy = new (mem.allocBytes(sizeof(TrackingAttrPath))) TrackingAttrPath(path);
-    thunkOrigins[thunk] = ThunkOrigin{scopeId, pathCopy};
+    thunkOrigins[key] = ThunkOrigin{scopeId, pathCopy};
+
+    if (debugTrackingEval) {
+        std::cerr << "[TRACK] tagThunkOrigin: stored origin for (env=" << (void*)key.first
+                  << ", expr=" << (void*)key.second << ") path=[";
+        for (size_t i = 0; i < path.size(); i++) {
+            if (i > 0) std::cerr << ".";
+            std::cerr << symbols[path[i]];
+        }
+        std::cerr << "] (thunkOrigins.size()=" << thunkOrigins.size() << ")\n";
+    }
 }
 
 EvalState::ThunkOrigin * EvalState::getThunkOrigin(const Value * thunk)
 {
-    auto it = thunkOrigins.find(thunk);
+    if (!thunk->isThunk()) {
+        return nullptr;
+    }
+
+    auto key = ThunkKey{thunk->thunk().env, thunk->thunk().expr};
+    auto it = thunkOrigins.find(key);
     if (it != thunkOrigins.end()) {
+        if (debugTrackingEval) {
+            std::cerr << "[TRACK] getThunkOrigin: FOUND origin for (env=" << (void*)key.first
+                      << ", expr=" << (void*)key.second << ")\n";
+        }
         return &it->second;
+    }
+    if (debugTrackingEval && thunkOrigins.size() > 0) {
+        std::cerr << "[TRACK] getThunkOrigin: NOT FOUND for (env=" << (void*)key.first
+                  << ", expr=" << (void*)key.second << ") (thunkOrigins has " << thunkOrigins.size() << " entries)\n";
     }
     return nullptr;
 }

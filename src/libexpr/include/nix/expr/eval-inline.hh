@@ -85,40 +85,47 @@ Env & EvalMemory::allocEnv(size_t size)
 [[gnu::always_inline]]
 void EvalState::forceValue(Value & v, const PosIdx pos)
 {
-    if (v.isThunk()) {
-        // Check if this thunk has an embedded origin for tracking.
-        // If so, push the origin as the accessor context so any attribute
-        // accesses during evaluation are recorded with the correct accessor.
-        bool pushedTrackingCtx = false;
-        auto * origin = getThunkOrigin(&v);
-        if (origin && origin->path) {
-            ForceContext ctx;
-            ctx.scopeId = origin->scopeId;
-            ctx.originPath = *origin->path;
-            forceContextStack.push_back(std::move(ctx));
-            pushedTrackingCtx = true;
-        }
+    // Loop to fully force the value (handles nested thunks from tagThunkOrigin)
+    while (v.isThunk() || v.isApp()) {
+        if (v.isThunk()) {
+            // Check if this thunk has an embedded origin for tracking.
+            // If so, push the origin as the accessor context so any attribute
+            // accesses during evaluation are recorded with the correct accessor.
+            bool pushedTrackingCtx = false;
+            auto * origin = getThunkOrigin(&v);
+            if (origin && origin->path) {
+                ForceContext ctx;
+                ctx.scopeId = origin->scopeId;
+                ctx.originPath = *origin->path;
+                forceContextStack.push_back(std::move(ctx));
+                pushedTrackingCtx = true;
+            }
 
-        Env * env = v.thunk().env;
-        assert(env || v.isBlackhole());
-        Expr * expr = v.thunk().expr;
-        try {
-            v.mkBlackhole();
-            // checkInterrupt();
-            if (env) [[likely]]
-                expr->eval(*this, *env, v);
-            else
-                ExprBlackHole::throwInfiniteRecursionError(*this, v);
-        } catch (...) {
-            v.mkThunk(env, expr);
-            tryFixupBlackHolePos(v, pos);
-            if (pushedTrackingCtx) forceContextStack.pop_back();
-            throw;
-        }
+            Env * env = v.thunk().env;
+            assert(env || v.isBlackhole());
+            Expr * expr = v.thunk().expr;
+            try {
+                v.mkBlackhole();
+                // checkInterrupt();
+                if (env) [[likely]]
+                    expr->eval(*this, *env, v);
+                else
+                    ExprBlackHole::throwInfiniteRecursionError(*this, v);
+            } catch (...) {
+                v.mkThunk(env, expr);
+                tryFixupBlackHolePos(v, pos);
+                if (pushedTrackingCtx) {
+                    forceContextStack.pop_back();
+                }
+                throw;
+            }
 
-        if (pushedTrackingCtx) forceContextStack.pop_back();
-    } else if (v.isApp()) {
-        callFunction(*v.app().left, *v.app().right, v, pos);
+            if (pushedTrackingCtx) {
+                forceContextStack.pop_back();
+            }
+        } else if (v.isApp()) {
+            callFunction(*v.app().left, *v.app().right, v, pos);
+        }
     }
 }
 
