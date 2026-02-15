@@ -1118,10 +1118,7 @@ public:
 
     /** Thunk origin tracking - maps thunk Value* to their origin path.
         This is the key to thunk-embedded origins: when a thunk is forced,
-        we check this map and push the origin as accessor context.
-        Unlike valueOrigins, this is checked FIRST in forceValue and takes
-        precedence, enabling the new tracking approach to work alongside
-        the existing approach. */
+        we check this map and push the origin as accessor context. */
     boost::unordered_flat_map<
         const Value *,
         ThunkOrigin,
@@ -1135,27 +1132,6 @@ public:
         {accessor from stack, accessed path} as a dependency. */
     std::vector<ForceContext, traceable_allocator<ForceContext>> forceContextStack;
 
-    /** When true, skip pushing force context during value forcing.
-        Used during registration to avoid premature dependency recording. */
-    bool skipTrackingContextPush = false;
-
-    /** Mapping from thunk value to its attribute path for tracked attrsets.
-        This enables proper lexical scoping when lambdas access tracked attrs.
-        Note: thunkOrigins takes precedence over this when both are present. */
-    boost::unordered_flat_map<
-        const Value *,
-        std::pair<TrackingScopeId, TrackingAttrPath>,
-        std::hash<const Value *>,
-        std::equal_to<const Value *>,
-        traceable_allocator<std::pair<const Value * const, std::pair<TrackingScopeId, TrackingAttrPath>>>> valueOrigins;
-
-    /** Lambda origin tracking for lexical scoping (lambda → scope ID + origin path) */
-    boost::unordered_flat_map<
-        const ExprLambda *,
-        std::pair<TrackingScopeId, TrackingAttrPath>,
-        std::hash<const ExprLambda *>,
-        std::equal_to<const ExprLambda *>,
-        traceable_allocator<std::pair<const ExprLambda * const, std::pair<TrackingScopeId, TrackingAttrPath>>>> lambdaOrigins;
 
     /** Record a dependency in the given scope */
     void recordDependency(TrackingScopeId scopeId, const TrackingAttrPath & accessor, const TrackingAttrPath & accessed);
@@ -1182,11 +1158,9 @@ private:
     friend void prim_getAttr(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_match(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_split(EvalState & state, const PosIdx pos, Value ** args, Value & v);
-    friend void prim_fixWithTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_tagThunkOrigin(EvalState & state, const PosIdx pos, Value ** args, Value & v);
     friend void prim_getDependencies(EvalState & state, const PosIdx pos, Value ** args, Value & v);
-    friend void prim_getAttrWithTracking(EvalState & state, const PosIdx pos, Value ** args, Value & v);
 
     friend struct Value;
     friend class ListBuilder;

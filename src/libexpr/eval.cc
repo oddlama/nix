@@ -1084,16 +1084,6 @@ Value * Expr::maybeThunk(EvalState & state, Env & env)
 {
     Value * v = state.allocValue();
     mkThunk(*v, env, this);
-
-    // Register thunk with current force context for proper dependency attribution.
-    // This ensures that when function arguments (which are thunks) are later forced,
-    // any attribute accesses are attributed to where the argument was written,
-    // not where it was forced.
-    if (!state.forceContextStack.empty()) {
-        auto & ctx = state.forceContextStack.back();
-        state.valueOrigins[v] = {ctx.scopeId, ctx.originPath};
-    }
-
     return v;
 }
 
@@ -1596,12 +1586,6 @@ void ExprOpHasAttr::eval(EvalState & state, Env & env, Value & v)
 void ExprLambda::eval(EvalState & state, Env & env, Value & v)
 {
     v.mkLambda(&env, this);
-
-    // If in tracking context, record lambda's origin for lexical scoping
-    if (!state.forceContextStack.empty()) {
-        auto & ctx = state.forceContextStack.back();
-        state.lambdaOrigins[this] = {ctx.scopeId, ctx.originPath};
-    }
 }
 
 void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes, const PosIdx pos)
@@ -1711,17 +1695,6 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
             if (countCalls)
                 incrFunctionCall(&lambda);
 
-            // Check if this lambda has a recorded origin for tracking
-            bool pushedTrackingCtx = false;
-            auto originIt = lambdaOrigins.find(&lambda);
-            if (originIt != lambdaOrigins.end()) {
-                ForceContext ctx;
-                ctx.scopeId = originIt->second.first;
-                ctx.originPath = originIt->second.second;
-                forceContextStack.push_back(std::move(ctx));
-                pushedTrackingCtx = true;
-            }
-
             /* Evaluate the body. */
             try {
                 auto dts = debugRepl
@@ -1735,9 +1708,7 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
                                : nullptr;
 
                 lambda.body->eval(*this, env2, vCur);
-                if (pushedTrackingCtx) forceContextStack.pop_back();
             } catch (Error & e) {
-                if (pushedTrackingCtx) forceContextStack.pop_back();
                 if (loggerSettings.showTrace.get()) {
                     addErrorTrace(
                         e,
