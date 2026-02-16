@@ -393,6 +393,13 @@ void EvalState::recordDependency(TrackingScopeId scopeId, const TrackingAttrPath
         std::cerr << ")\n";
     }
     if (auto * scope = findTrackingScope(scopeId)) {
+        // Skip exact duplicates of the last recorded dependency (common with
+        // intermediate + final recording in ExprSelect)
+        if (!scope->deps.empty()) {
+            auto & last = scope->deps.back();
+            if (last.accessor == accessor && last.accessed == accessed)
+                return;
+        }
         scope->deps.push_back({accessor, accessed});
     }
 }
@@ -1565,9 +1572,19 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                 }
             }
 
-            // Build accessed path
+            // Build accessed path and record intermediate dependencies.
+            // Without intermediate recording, sub-attrset accessor nodes
+            // (e.g., boot.kernelPackages.kernel.features) become disconnected
+            // because only the final path is recorded as a dependency target.
             if (trackedScopeId != 0) {
                 accessedPath.push_back(name);
+
+                if (!state.forceContextStack.empty()) {
+                    auto & ctx = state.forceContextStack.back();
+                    if (ctx.scopeId == trackedScopeId) {
+                        state.recordDependency(trackedScopeId, ctx.originPath, accessedPath);
+                    }
+                }
             }
 
             vAttrs = j->value;
@@ -1723,6 +1740,18 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
                    there is no matching actual argument but the formal
                    argument has a default, use the default. */
                 size_t attrsUsed = 0;
+
+                // Check if the argument attrset is tracked for dependency recording.
+                // This handles pattern match destructuring like { group, permissions, ... }:
+                // which bypasses ExprSelect and would otherwise miss tracking.
+                TrackedBindingInfo * formalTrackInfo = nullptr;
+                if (!forceContextStack.empty()) {
+                    auto trackIt = trackedBindings.find(args[0]->attrs());
+                    if (trackIt != trackedBindings.end()) {
+                        formalTrackInfo = &trackIt->second;
+                    }
+                }
+
                 for (auto & i : formals->formals) {
                     auto j = args[0]->attrs()->get(i.name);
                     if (!j) {
@@ -1739,6 +1768,17 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
                         env2.values[displ++] = i.def->maybeThunk(*this, env2);
                     } else {
                         attrsUsed++;
+
+                        // Record dependency for tracked attrset destructuring
+                        if (formalTrackInfo) {
+                            auto & ctx = forceContextStack.back();
+                            if (ctx.scopeId == formalTrackInfo->scopeId) {
+                                TrackingAttrPath accessedPath = formalTrackInfo->prefix;
+                                accessedPath.push_back(i.name);
+                                recordDependency(formalTrackInfo->scopeId, ctx.originPath, accessedPath);
+                            }
+                        }
+
                         env2.values[displ++] = j->value;
                     }
                 }
