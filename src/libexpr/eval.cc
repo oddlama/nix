@@ -392,6 +392,8 @@ void EvalState::recordDependency(TrackingScopeId scopeId, const TrackingAttrPath
         }
         std::cerr << ")\n";
     }
+    if (accessor == accessed)
+        return;
     if (auto * scope = findTrackingScope(scopeId)) {
         // Skip exact duplicates of the last recorded dependency (common with
         // intermediate + final recording in ExprSelect)
