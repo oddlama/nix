@@ -1541,14 +1541,30 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                 }
             }
 
-            // Check if this is the first attr access on a tracked attrset
-            if (accessedPath.empty() && vAttrs->type() == nAttrs) {
+            // Check if this attrset is tracked (either root or previously registered sub-attrset)
+            if (vAttrs->type() == nAttrs) {
                 auto trackIt = state.trackedBindings.find(vAttrs->attrs());
                 if (trackIt != state.trackedBindings.end()) {
-                    originalBindings = vAttrs->attrs();
-                    trackedScopeId = trackIt->second.scopeId;
-                    // Start with the prefix (for sub-attrset tracking)
-                    accessedPath = trackIt->second.prefix;
+                    if (accessedPath.empty()) {
+                        // First tracked attrset in the chain — start tracking
+                        originalBindings = vAttrs->attrs();
+                        trackedScopeId = trackIt->second.scopeId;
+                        accessedPath = trackIt->second.prefix;
+                    }
+                    // else: already tracking and this sub-attrset is already registered — good
+                } else if (trackedScopeId != 0 && !accessedPath.empty()) {
+                    // Intermediate attrset not yet registered — register it and tag members.
+                    // This handles freeform submodule values (e.g., system.build.toplevel):
+                    // when traversing config.system.build, register the "build" sub-attrset
+                    // so that "toplevel" gets tagged BEFORE it's forced.
+                    state.trackedBindings[vAttrs->attrs()] = {trackedScopeId, accessedPath};
+                    for (auto & attr : *vAttrs->attrs()) {
+                        if (attr.value->isThunk()) {
+                            EvalState::TrackingAttrPath memberPath = accessedPath;
+                            memberPath.push_back(attr.name);
+                            state.tagThunkOrigin(attr.value, trackedScopeId, memberPath);
+                        }
+                    }
                 }
             }
 
@@ -1578,10 +1594,22 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
         // If the result of selecting through a tracked attrset is itself an attrset,
         // register it so that later accesses (e.g., "let cfg = config.x; in cfg.y")
         // are tracked with the correct prefix.
+        // Also tag member thunks so they push the correct accessor context when
+        // forced — this handles freeform values (e.g., system.build.toplevel)
+        // that aren't tagged by the module system's tagOptionsRecursive.
         if (trackedScopeId != 0 && vAttrs->type() == nAttrs) {
             auto subIt = state.trackedBindings.find(vAttrs->attrs());
             if (subIt == state.trackedBindings.end()) {
                 state.trackedBindings[vAttrs->attrs()] = {trackedScopeId, accessedPath};
+
+                // Tag member thunks for accessor tracking
+                for (auto & attr : *vAttrs->attrs()) {
+                    if (attr.value->isThunk()) {
+                        EvalState::TrackingAttrPath memberPath = accessedPath;
+                        memberPath.push_back(attr.name);
+                        state.tagThunkOrigin(attr.value, trackedScopeId, memberPath);
+                    }
+                }
             }
         }
 
