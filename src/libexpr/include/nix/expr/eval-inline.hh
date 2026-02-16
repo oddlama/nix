@@ -124,7 +124,22 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
                 forceContextStack.pop_back();
             }
         } else if (v.isApp()) {
+            // Check for tracking origin on tApp values (e.g., freeform submodule members)
+            bool pushedTrackingCtx = false;
+            auto * origin = getThunkOrigin(&v);
+            if (origin && origin->path) {
+                ForceContext ctx;
+                ctx.scopeId = origin->scopeId;
+                ctx.originPath = *origin->path;
+                forceContextStack.push_back(std::move(ctx));
+                pushedTrackingCtx = true;
+            }
+
             callFunction(*v.app().left, *v.app().right, v, pos);
+
+            if (pushedTrackingCtx) {
+                forceContextStack.pop_back();
+            }
         }
     }
 }

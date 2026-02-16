@@ -5405,12 +5405,8 @@ void prim_tagThunkOrigin(EvalState & state, const PosIdx pos, Value ** args, Val
     // Copy the value to the output first
     v = *thunk;
 
-    // Tag based on the thunk's (env, expr) - this survives Value copies
-    if (v.isThunk()) {
-        state.tagThunkOrigin(&v, scopeId.value, path);
-    }
-    // Note: If the value is already forced or is an App, we can't tag it with (env, expr).
-    // The caller should ensure they're passing an unevaluated thunk.
+    // Tag the value if it's any kind of lazy value (tThunk, tApp, tPrimOpApp)
+    state.tagThunkOrigin(&v, scopeId.value, path);
 }
 
 static RegisterPrimOp primop_tagThunkOrigin({

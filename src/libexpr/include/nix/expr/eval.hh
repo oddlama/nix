@@ -1141,6 +1141,16 @@ public:
         std::equal_to<ThunkKey>,
         traceable_allocator<std::pair<const ThunkKey, ThunkOrigin>>> thunkOrigins;
 
+    /** Value-pointer origin tracking - for tApp and tPrimOpApp values that
+        don't have (Env*, Expr*) keys. We key on Value* directly since these
+        are stable pointers in Bindings until forced. */
+    boost::unordered_flat_map<
+        const Value *,
+        ThunkOrigin,
+        std::hash<const Value *>,
+        std::equal_to<const Value *>,
+        traceable_allocator<std::pair<const Value * const, ThunkOrigin>>> valueOrigins;
+
     /** Current force context stack (who is being evaluated).
         When a thunk with registered origin is forced, it pushes its origin here.
         When attribute access occurs on a tracked attrset, we record

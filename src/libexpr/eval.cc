@@ -408,51 +408,50 @@ EvalState::TrackingScope * EvalState::findTrackingScope(TrackingScopeId scopeId)
 
 void EvalState::tagThunkOrigin(Value * thunk, TrackingScopeId scopeId, const TrackingAttrPath & path)
 {
-    // Only tag actual thunks (with env and expr)
-    if (!thunk->isThunk()) {
-        if (debugTrackingEval) {
-            std::cerr << "[TRACK] tagThunkOrigin: skipping non-thunk (type=" << thunk->type() << ")\n";
-        }
+    // Allocate a copy of the path on the heap (GC-managed)
+    auto * pathCopy = new (mem.allocBytes(sizeof(TrackingAttrPath))) TrackingAttrPath(path);
+
+    if (thunk->isThunk()) {
+        // Key on (env, expr) which survives Value copies
+        auto key = ThunkKey{thunk->thunk().env, thunk->thunk().expr};
+        thunkOrigins[key] = ThunkOrigin{scopeId, pathCopy};
+    } else if (thunk->type() == nThunk) {
+        // tApp or tPrimOpApp: key on Value* directly
+        valueOrigins[thunk] = ThunkOrigin{scopeId, pathCopy};
+    } else {
+        // Already forced (not a thunk) — can't tag
         return;
     }
 
-    // Key on (env, expr) which survives Value copies
-    auto key = ThunkKey{thunk->thunk().env, thunk->thunk().expr};
-
-    // Allocate a copy of the path on the heap (GC-managed)
-    auto * pathCopy = new (mem.allocBytes(sizeof(TrackingAttrPath))) TrackingAttrPath(path);
-    thunkOrigins[key] = ThunkOrigin{scopeId, pathCopy};
-
     if (debugTrackingEval) {
-        std::cerr << "[TRACK] tagThunkOrigin: stored origin for (env=" << (void*)key.first
-                  << ", expr=" << (void*)key.second << ") path=[";
+        std::cerr << "[TRACK] tagThunkOrigin: stored origin for value@" << (void*)thunk
+                  << " (isThunk=" << thunk->isThunk() << ", isApp=" << thunk->isApp()
+                  << ") path=[";
         for (size_t i = 0; i < path.size(); i++) {
             if (i > 0) std::cerr << ".";
             std::cerr << symbols[path[i]];
         }
-        std::cerr << "] (thunkOrigins.size()=" << thunkOrigins.size() << ")\n";
+        std::cerr << "]\n";
     }
 }
 
 EvalState::ThunkOrigin * EvalState::getThunkOrigin(const Value * thunk)
 {
-    if (!thunk->isThunk()) {
-        return nullptr;
+    // Check thunkOrigins for tThunk values (keyed by env/expr)
+    if (thunk->isThunk()) {
+        auto key = ThunkKey{thunk->thunk().env, thunk->thunk().expr};
+        auto it = thunkOrigins.find(key);
+        if (it != thunkOrigins.end()) {
+            return &it->second;
+        }
     }
 
-    auto key = ThunkKey{thunk->thunk().env, thunk->thunk().expr};
-    auto it = thunkOrigins.find(key);
-    if (it != thunkOrigins.end()) {
-        if (debugTrackingEval) {
-            std::cerr << "[TRACK] getThunkOrigin: FOUND origin for (env=" << (void*)key.first
-                      << ", expr=" << (void*)key.second << ")\n";
-        }
-        return &it->second;
+    // Check valueOrigins for tApp/tPrimOpApp values (keyed by Value*)
+    auto vit = valueOrigins.find(thunk);
+    if (vit != valueOrigins.end()) {
+        return &vit->second;
     }
-    if (debugTrackingEval && thunkOrigins.size() > 0) {
-        std::cerr << "[TRACK] getThunkOrigin: NOT FOUND for (env=" << (void*)key.first
-                  << ", expr=" << (void*)key.second << ") (thunkOrigins has " << thunkOrigins.size() << " entries)\n";
-    }
+
     return nullptr;
 }
 
@@ -1554,12 +1553,10 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                     // else: already tracking and this sub-attrset is already registered — good
                 } else if (trackedScopeId != 0 && !accessedPath.empty()) {
                     // Intermediate attrset not yet registered — register it and tag members.
-                    // This handles freeform submodule values (e.g., system.build.toplevel):
-                    // when traversing config.system.build, register the "build" sub-attrset
-                    // so that "toplevel" gets tagged BEFORE it's forced.
                     state.trackedBindings[vAttrs->attrs()] = {trackedScopeId, accessedPath};
                     for (auto & attr : *vAttrs->attrs()) {
-                        if (attr.value->isThunk()) {
+                        // Tag any lazy value (tThunk, tApp, tPrimOpApp)
+                        if (attr.value->type(true) == nThunk) {
                             EvalState::TrackingAttrPath memberPath = accessedPath;
                             memberPath.push_back(attr.name);
                             state.tagThunkOrigin(attr.value, trackedScopeId, memberPath);
@@ -1602,9 +1599,9 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
             if (subIt == state.trackedBindings.end()) {
                 state.trackedBindings[vAttrs->attrs()] = {trackedScopeId, accessedPath};
 
-                // Tag member thunks for accessor tracking
+                // Tag any lazy member values for accessor tracking
                 for (auto & attr : *vAttrs->attrs()) {
-                    if (attr.value->isThunk()) {
+                    if (attr.value->type(true) == nThunk) {
                         EvalState::TrackingAttrPath memberPath = accessedPath;
                         memberPath.push_back(attr.name);
                         state.tagThunkOrigin(attr.value, trackedScopeId, memberPath);
