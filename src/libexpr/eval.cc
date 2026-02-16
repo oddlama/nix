@@ -1556,6 +1556,16 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                         originalBindings = vAttrs->attrs();
                         trackedScopeId = trackIt->second.scopeId;
                         accessedPath = trackIt->second.prefix;
+                        // If starting from a non-empty prefix (a registered sub-attrset),
+                        // record a dep for the prefix itself. This ensures e.g.
+                        // accessing options.X.isDefined also records X as a target,
+                        // not just X.isDefined.
+                        if (!accessedPath.empty() && !state.forceContextStack.empty()) {
+                            auto & ctx = state.forceContextStack.back();
+                            if (ctx.scopeId == trackedScopeId) {
+                                state.recordDependency(trackedScopeId, ctx.originPath, accessedPath);
+                            }
+                        }
                     }
                     // else: already tracking and this sub-attrset is already registered — good
                 } else if (trackedScopeId != 0 && !accessedPath.empty()) {
