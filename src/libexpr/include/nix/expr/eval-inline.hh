@@ -87,26 +87,27 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
 {
     // Loop to fully force the value (handles nested thunks from tagThunkOrigin)
     while (v.isThunk() || v.isApp()) {
-        if (v.isThunk()) {
-            // Check if this thunk has an embedded origin for tracking.
-            // If so, push the origin as the accessor context so any attribute
-            // accesses during evaluation are recorded with the correct accessor.
-            bool pushedTrackingCtx = false;
-            auto * origin = getThunkOrigin(&v);
-            if (origin && origin->path) {
-                ForceContext ctx;
-                ctx.scopeId = origin->scopeId;
-                ctx.originPath = *origin->path;
-                forceContextStack.push_back(std::move(ctx));
-                pushedTrackingCtx = true;
-            }
+        // Check if this lazy value has an embedded origin for tracking.
+        auto * origin = getThunkOrigin(&v);
+        bool pushedTrackingCtx = false;
+        TrackingScopeId originScopeId = 0;
+        TrackingAttrPath originPath;
+        if (origin && origin->path) {
+            ForceContext ctx;
+            ctx.scopeId = origin->scopeId;
+            ctx.originPath = *origin->path;
+            originScopeId = origin->scopeId;
+            originPath = *origin->path;
+            forceContextStack.push_back(std::move(ctx));
+            pushedTrackingCtx = true;
+        }
 
+        if (v.isThunk()) {
             Env * env = v.thunk().env;
             assert(env || v.isBlackhole());
             Expr * expr = v.thunk().expr;
             try {
                 v.mkBlackhole();
-                // checkInterrupt();
                 if (env) [[likely]]
                     expr->eval(*this, *env, v);
                 else
@@ -119,26 +120,29 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
                 }
                 throw;
             }
-
-            if (pushedTrackingCtx) {
-                forceContextStack.pop_back();
-            }
-        } else if (v.isApp()) {
-            // Check for tracking origin on tApp values (e.g., freeform submodule members)
-            bool pushedTrackingCtx = false;
-            auto * origin = getThunkOrigin(&v);
-            if (origin && origin->path) {
-                ForceContext ctx;
-                ctx.scopeId = origin->scopeId;
-                ctx.originPath = *origin->path;
-                forceContextStack.push_back(std::move(ctx));
-                pushedTrackingCtx = true;
-            }
-
+        } else {
+            // v.isApp()
             callFunction(*v.app().left, *v.app().right, v, pos);
+        }
 
-            if (pushedTrackingCtx) {
-                forceContextStack.pop_back();
+        if (pushedTrackingCtx) {
+            forceContextStack.pop_back();
+
+            // If the forced value is an attrset, register it as a tracked
+            // sub-attrset so downstream accesses (e.g., from lambda arguments
+            // after mapAttrsToList iteration) are tracked.
+            if (v.type() == nAttrs && originScopeId != 0) {
+                auto subIt = trackedBindings.find(v.attrs());
+                if (subIt == trackedBindings.end()) {
+                    trackedBindings[v.attrs()] = {originScopeId, originPath};
+                    for (auto & attr : *v.attrs()) {
+                        if (attr.value->type(true) == nThunk) {
+                            TrackingAttrPath memberPath = originPath;
+                            memberPath.push_back(attr.name);
+                            tagThunkOrigin(attr.value, originScopeId, memberPath);
+                        }
+                    }
+                }
             }
         }
     }
