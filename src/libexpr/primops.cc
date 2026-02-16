@@ -3091,10 +3091,10 @@ void prim_getAttr(EvalState & state, const PosIdx pos, Value ** args, Value & v)
         auto trackIt = state.trackedBindings.find(args[1]->attrs());
         if (trackIt != state.trackedBindings.end()) {
             auto & ctx = state.forceContextStack.back();
-            if (ctx.scopeId == trackIt->second) {
-                EvalState::TrackingAttrPath accessedPath;
+            if (ctx.scopeId == trackIt->second.scopeId) {
+                EvalState::TrackingAttrPath accessedPath = trackIt->second.prefix;
                 accessedPath.push_back(name);
-                state.recordDependency(trackIt->second, ctx.originPath, accessedPath);
+                state.recordDependency(trackIt->second.scopeId, ctx.originPath, accessedPath);
             }
         }
     }
@@ -5218,10 +5218,10 @@ void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value
     if (it != state.trackedBindings.end()) {
         // Already tracked, return existing scope ID
         if (debugTracking) {
-            std::cerr << "[TRACK] trackAttrset: already tracked, returning scopeId=" << it->second
+            std::cerr << "[TRACK] trackAttrset: already tracked, returning scopeId=" << it->second.scopeId
                       << " (Bindings*=" << (void*)args[0]->attrs() << ")\n";
         }
-        v.mkInt(it->second);
+        v.mkInt(it->second.scopeId);
         return;
     }
 
@@ -5231,7 +5231,7 @@ void prim_trackAttrset(EvalState & state, const PosIdx pos, Value ** args, Value
     scope.id = scopeId;
     scope.trackedBindings = args[0]->attrs();
     state.trackingScopes.push_back(std::move(scope));
-    state.trackedBindings[args[0]->attrs()] = scopeId;
+    state.trackedBindings[args[0]->attrs()] = {scopeId, {}};
 
     if (debugTracking) {
         std::cerr << "[TRACK] trackAttrset: NEW scopeId=" << scopeId
@@ -5330,16 +5330,16 @@ void prim_registerTrackedAttrset(EvalState & state, const PosIdx pos, Value ** a
 
     // Check if this attrset is already registered with a different scope
     auto it = state.trackedBindings.find(args[1]->attrs());
-    if (it != state.trackedBindings.end() && it->second != scopeIdVal) {
+    if (it != state.trackedBindings.end() && it->second.scopeId != scopeIdVal) {
         // Already tracked by different scope - this is fine, just warn in debug
         if (debugTracking) {
-            std::cerr << "[TRACK] registerTrackedAttrset: attrset already tracked by scopeId=" << it->second
+            std::cerr << "[TRACK] registerTrackedAttrset: attrset already tracked by scopeId=" << it->second.scopeId
                       << ", ignoring registration for scopeId=" << scopeIdVal << "\n";
         }
     } else {
-        // Register the attrset with this scope
+        // Register the attrset with this scope (no prefix for root)
         scope->trackedBindings = args[1]->attrs();
-        state.trackedBindings[args[1]->attrs()] = scopeIdVal;
+        state.trackedBindings[args[1]->attrs()] = {scopeIdVal, {}};
 
         if (debugTracking) {
             std::cerr << "[TRACK] registerTrackedAttrset: scopeId=" << scopeIdVal

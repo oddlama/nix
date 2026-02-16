@@ -1108,13 +1108,19 @@ public:
     /** All tracking scopes */
     std::vector<TrackingScope, traceable_allocator<TrackingScope>> trackingScopes;
 
-    /** Which bindings are tracked (attrset pointer → scope ID) */
+    /** Info stored for each tracked attrset binding */
+    struct TrackedBindingInfo {
+        TrackingScopeId scopeId;
+        TrackingAttrPath prefix;  // path prefix for sub-attrsets (e.g., ["services", "nginx"])
+    };
+
+    /** Which bindings are tracked (attrset pointer → scope ID + prefix) */
     boost::unordered_flat_map<
         const Bindings *,
-        TrackingScopeId,
+        TrackedBindingInfo,
         std::hash<const Bindings *>,
         std::equal_to<const Bindings *>,
-        traceable_allocator<std::pair<const Bindings * const, TrackingScopeId>>> trackedBindings;
+        traceable_allocator<std::pair<const Bindings * const, TrackedBindingInfo>>> trackedBindings;
 
     /** Thunk origin tracking - maps (Env*, Expr*) pairs to their origin path.
         We key on the thunk's internal (env, expr) pair rather than Value* because

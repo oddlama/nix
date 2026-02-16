@@ -1515,20 +1515,18 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
             if (def) {
                 state.forceValue(*vAttrs, pos);
                 if (vAttrs->type() != nAttrs || !(j = vAttrs->attrs()->get(name))) {
+                    // Record dependency up to the point we could resolve before falling back to default
+                    if (trackedScopeId != 0 && !accessedPath.empty() && !state.forceContextStack.empty()) {
+                        auto & ctx = state.forceContextStack.back();
+                        if (ctx.scopeId == trackedScopeId) {
+                            state.recordDependency(trackedScopeId, ctx.originPath, accessedPath);
+                        }
+                    }
                     def->eval(state, env, v);
                     return;
                 }
             } else {
                 state.forceAttrs(*vAttrs, pos, "while selecting an attribute");
-
-                // Check if this is the first attr access on a tracked attrset
-                if (accessedPath.empty()) {
-                    auto trackIt = state.trackedBindings.find(vAttrs->attrs());
-                    if (trackIt != state.trackedBindings.end()) {
-                        originalBindings = vAttrs->attrs();
-                        trackedScopeId = trackIt->second;
-                    }
-                }
 
                 if (!(j = vAttrs->attrs()->get(name))) {
                     StringSet allAttrNames;
@@ -1540,6 +1538,17 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                         .withSuggestions(suggestions)
                         .withFrame(env, *this)
                         .debugThrow();
+                }
+            }
+
+            // Check if this is the first attr access on a tracked attrset
+            if (accessedPath.empty() && vAttrs->type() == nAttrs) {
+                auto trackIt = state.trackedBindings.find(vAttrs->attrs());
+                if (trackIt != state.trackedBindings.end()) {
+                    originalBindings = vAttrs->attrs();
+                    trackedScopeId = trackIt->second.scopeId;
+                    // Start with the prefix (for sub-attrset tracking)
+                    accessedPath = trackIt->second.prefix;
                 }
             }
 
@@ -1564,6 +1573,17 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
         }
 
         state.forceValue(*vAttrs, (pos2 ? pos2 : this->pos));
+
+        // Register sub-attrsets for recursive tracking.
+        // If the result of selecting through a tracked attrset is itself an attrset,
+        // register it so that later accesses (e.g., "let cfg = config.x; in cfg.y")
+        // are tracked with the correct prefix.
+        if (trackedScopeId != 0 && vAttrs->type() == nAttrs) {
+            auto subIt = state.trackedBindings.find(vAttrs->attrs());
+            if (subIt == state.trackedBindings.end()) {
+                state.trackedBindings[vAttrs->attrs()] = {trackedScopeId, accessedPath};
+            }
+        }
 
     } catch (Error & e) {
         if (pos2) {
