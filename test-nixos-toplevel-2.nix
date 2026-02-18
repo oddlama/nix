@@ -23,12 +23,13 @@ let
             (modulesPath + "/profiles/minimal.nix")
           ];
 
+          services.vaultwarden.enable = true;
           boot.loader.grub.device = "nodev";
           fileSystems."/" = {
             device = "/dev/sda1";
             fsType = "ext4";
           };
-          system.stateVersion = "25.11";
+          system.stateVersion = "24.05";
         }
       )
     ];
