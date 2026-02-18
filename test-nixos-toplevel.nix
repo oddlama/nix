@@ -292,16 +292,33 @@ let
     builtins.listToAttrs (map (k: { name = k; value = true; }) allPrefixes);
 
   # Leaf nodes: kept nodes with no descendants in the graph.
-  # Exclude _module.args.* (packages/utils aren't config values).
+  # Exclude:
+  #   - _module.args.* (packages/utils aren't config values)
+  #   - Renamed/obsolete options (visible = false) — they just alias other options
   leafNodes = builtins.filter (p:
     let
       key = pathKey p;
       isModuleArgs = builtins.length p >= 2
         && builtins.elemAt p 0 == "_module"
         && builtins.elemAt p 1 == "args";
+      # Check if this is a renamed/obsolete option (visible = false).
+      # Only check paths that are declared options; sub-option value paths
+      # (e.g. users.users.dhcpcd.uid) won't be in optionPathSet.
+      # NOTE: use tryEval (shallow), NOT tryCatchAll — tryCatchAll deeply
+      # evaluates the entire option record including .value, which triggers
+      # renamed option trace messages via the apply callback.
+      isRenamedOption =
+        if optionPathSet ? ${key} then
+          let res = builtins.tryEval (lib.attrByPath p null nixos.options);
+          in res.success
+             && res.value != null
+             && (res.value.visible or true) == false
+        else
+          false;
     in
     !(parentKeySet ? ${key})
     && !isModuleArgs
+    && !isRenamedOption
   ) keptNodes;
 
   # 8. Config values extraction — only for leaf nodes
