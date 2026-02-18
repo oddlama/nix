@@ -16,13 +16,7 @@ let
     trackDependencies = true;
     modules = [
       (
-        {
-          config,
-          lib,
-          pkgs,
-          modulesPath,
-          ...
-        }:
+        { modulesPath, ... }:
         {
           imports = [
             (modulesPath + "/profiles/minimal.nix")
@@ -49,7 +43,9 @@ in
     rawDeps
     filteredDeps
     configValues
+    explicitConfigValues
     leafNodes
+    explicitLeafNodes
     keptNodes
     rawDotOutput
     filteredDotOutput
