@@ -51,21 +51,76 @@ let
     in
     map (group: builtins.head group) (builtins.attrValues grouped);
 
-  # Convert a path list to a dot-safe node name
-  pathToNode = path: builtins.replaceStrings [ "." ] [ "_" ] (lib.concatStringsSep "." path);
+  # Format a path component for Nix-style display.
+  # Components matching [a-zA-Z_][0-9a-zA-Z_-]* are bare; others are quoted.
+  formatComponent = c:
+    if builtins.match "[a-zA-Z_][0-9a-zA-Z_-]*" c != null
+    then c
+    else "\"" + builtins.replaceStrings ["\\" "\""] ["\\\\" "\\\""] c + "\"";
+
+  # Format a full path as Nix-style dot notation (e.g. services.nginx.enable
+  # or fileSystems."/".device or systemd.services."getty@".enable)
+  formatPath = path: lib.concatStringsSep "." (map formatComponent path);
+
+  # Escape a string for embedding inside DOT "..." strings.
+  dotEscape = s: builtins.replaceStrings ["\\" "\""] ["\\\\" "\\\""] s;
+
+  # Section colors for DOT graph visualization.
+  # Returns [fillcolor, fontcolor] for a given top-level path component.
+  sectionStyle = toplevel:
+    let styles = {
+      services       = { fill = "#4e79a7"; font = "white"; };   # steel blue
+      systemd        = { fill = "#59a14f"; font = "white"; };   # green
+      boot           = { fill = "#e15759"; font = "white"; };   # red
+      networking     = { fill = "#f28e2b"; font = "white"; };   # orange
+      users          = { fill = "#b07aa1"; font = "white"; };   # purple
+      security       = { fill = "#ff9da7"; font = "black"; };   # pink
+      environment    = { fill = "#9c755f"; font = "white"; };   # brown
+      hardware       = { fill = "#bab0ac"; font = "black"; };   # gray
+      system         = { fill = "#76b7b2"; font = "black"; };   # teal
+      nix            = { fill = "#edc948"; font = "black"; };   # yellow
+      nixpkgs        = { fill = "#edc948"; font = "black"; };   # yellow
+      programs       = { fill = "#af7aa1"; font = "white"; };   # lavender
+      _module        = { fill = "#aec7e8"; font = "black"; };   # light blue (pkgs)
+      fileSystems    = { fill = "#d4a373"; font = "black"; };   # tan
+      virtualisation = { fill = "#8cd17d"; font = "black"; };   # lime
+      documentation  = { fill = "#b6992d"; font = "white"; };   # dark gold
+      assertions     = { fill = "#888888"; font = "white"; };   # dark gray
+      warnings       = { fill = "#888888"; font = "white"; };   # dark gray
+    };
+    in styles.${toplevel} or { fill = "#d3d3d3"; font = "black"; };  # light gray default
+
+  # Collect unique nodes from an edge list and emit DOT node declarations with colors
+  dotNodeDecls = edges:
+    let
+      allPaths = lib.concatMap (e: [ e.accessor e.accessed ]) edges;
+      uniqueNodes = builtins.attrValues (builtins.listToAttrs (
+        map (p: { name = dotEscape (formatPath p); value = p; }) allPaths
+      ));
+    in
+    lib.concatMapStringsSep "\n" (path:
+      let
+        label = dotEscape (formatPath path);
+        toplevel = builtins.head path;
+        style = sectionStyle toplevel;
+      in
+      "  \"${label}\" [style=filled, fillcolor=\"${style.fill}\", fontcolor=\"${style.font}\"];"
+    ) uniqueNodes;
 
   # Generate DOT format for graphviz (full graph)
   dotOutput = ''
     digraph dependencies {
       rankdir=LR;
       node [shape=box, fontsize=10];
-      edge [fontsize=8];
+      edge [fontsize=8, color="#666666"];
+
+    ${dotNodeDecls deps}
 
     ${lib.concatMapStringsSep "\n" (
       dep:
       let
-        accessor = pathToNode dep.accessor;
-        accessed = pathToNode dep.accessed;
+        accessor = dotEscape (formatPath dep.accessor);
+        accessed = dotEscape (formatPath dep.accessed);
       in
       "  \"${accessor}\" -> \"${accessed}\";"
     ) deps}
@@ -264,13 +319,15 @@ let
     digraph dependencies {
       rankdir=LR;
       node [shape=box, fontsize=10];
-      edge [fontsize=8];
+      edge [fontsize=8, color="#666666"];
+
+    ${dotNodeDecls filteredEdges}
 
     ${lib.concatMapStringsSep "\n" (
       dep:
       let
-        accessor = pathToNode dep.accessor;
-        accessed = pathToNode dep.accessed;
+        accessor = dotEscape (formatPath dep.accessor);
+        accessed = dotEscape (formatPath dep.accessed);
       in
       "  \"${accessor}\" -> \"${accessed}\";"
     ) filteredEdges}
