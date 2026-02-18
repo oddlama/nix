@@ -39,6 +39,7 @@ let
 
 in
 {
+  inherit nixos;
   inherit (tracking)
     rawDeps
     filteredDeps
