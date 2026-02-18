@@ -154,14 +154,20 @@ let
     let
       len = builtins.length path;
 
-      # Fast path: _module.args.pkgs.* has its own filter
-      isPkgsPath = len >= 3
+      # Detect _module.args.* paths
+      isModuleArgs = len >= 2
         && builtins.elemAt path 0 == "_module"
-        && builtins.elemAt path 1 == "args"
+        && builtins.elemAt path 1 == "args";
+
+      isPkgsPath = isModuleArgs && len >= 3
         && builtins.elemAt path 2 == "pkgs";
     in
     if isPkgsPath then
+      # _module.args.pkgs.* — special filter (keep packages, drop lib/config/internals)
       isPkgsKept path
+    else if isModuleArgs then
+      # _module.args.utils, _module.args.name, etc. — always drop
+      false
     else
       let
         # Find the longest option-path prefix of `path`
@@ -271,69 +277,115 @@ let
     }
   '';
 
-  # 7. Config values extraction
+  # 7. Graph-leaf detection
+  #
+  # A node is a "leaf" if no other kept node is a descendant of it.
+  # We build a set of all proper prefixes of kept node paths; any node
+  # whose key appears in that set is a parent and should NOT be serialized.
+  parentKeySet =
+    let
+      allPrefixes = lib.concatMap (p:
+        let len = builtins.length p;
+        in map (i: pathKey (lib.take i p)) (lib.range 1 (len - 1))
+      ) keptNodes;
+    in
+    builtins.listToAttrs (map (k: { name = k; value = true; }) allPrefixes);
+
+  # Leaf nodes: kept nodes with no descendants in the graph.
+  # Exclude _module.args.* (packages/utils aren't config values).
+  leafNodes = builtins.filter (p:
+    let
+      key = pathKey p;
+      isModuleArgs = builtins.length p >= 2
+        && builtins.elemAt p 0 == "_module"
+        && builtins.elemAt p 1 == "args";
+    in
+    !(parentKeySet ? ${key})
+    && !isModuleArgs
+  ) keptNodes;
+
+  # 8. Config values extraction — only for leaf nodes
+  # Uses builtins.tryCatchAll which catches ALL evaluation errors (not just
+  # throw/assert like tryEval), so we can safely attempt any config value.
   sanitizeValue =
     depth: value:
     if depth <= 0 then
       "<depth-limit>"
     else
-      let
-        evalResult = builtins.tryEval (builtins.deepSeq (builtins.typeOf value) value);
+      let t = builtins.typeOf value;
       in
-      if !evalResult.success then
-        "<error>"
-      else
-        let
-          v = evalResult.value;
-          t = builtins.typeOf v;
-        in
-        if t == "string" then
-          builtins.unsafeDiscardStringContext v
-        else if t == "path" then
-          "<path:${toString v}>"
-        else if t == "lambda" then
-          "<function>"
-        else if t == "list" then
-          map (sanitizeValue (depth - 1)) v
-        else if t == "set" then
-          if lib.isDerivation v then
-            "<derivation:${v.name or "unknown"}>"
-          else if builtins.length (builtins.attrNames v) > 50 then
-            "<attrset:${toString (builtins.length (builtins.attrNames v))} attrs>"
-          else
-            lib.mapAttrs (k: sanitizeValue (depth - 1)) v
+      if t == "string" then
+        builtins.unsafeDiscardStringContext value
+      else if t == "path" then
+        "<path:${toString value}>"
+      else if t == "lambda" then
+        "<function>"
+      else if t == "list" then
+        map (sanitizeValue (depth - 1)) value
+      else if t == "set" then
+        if lib.isDerivation value then
+          "<derivation:${value.name or "unknown"}>"
+        else if builtins.length (builtins.attrNames value) > 50 then
+          "<attrset:${toString (builtins.length (builtins.attrNames value))} attrs>"
         else
-          v; # int, float, bool, null pass through
+          lib.mapAttrs (_: sanitizeValue (depth - 1)) value
+      else
+        value; # int, float, bool, null pass through
 
-  # Only extract config for option paths that appear in the dependency graph
-  # Filter out invisible options (renamed/obsolete) — those use `abort` which
-  # tryEval cannot catch (it only catches throw/assert).
-  optionsInGraph = builtins.filter (
-    p:
-    optionPathSet ? ${pathKey p}
-    && (
-      let
-        optRes = builtins.tryEval (lib.attrByPath p null nixos.options);
-      in
-      optRes.success && optRes.value != null && (optRes.value.visible or true) != false
-    )
-  ) keptNodes;
-
-  configValues = builtins.foldl' (
-    acc: path:
+  # Build config values tree by grouping paths by first component and recursing.
+  # This avoids O(n) recursive lib.recursiveUpdate calls which cause stack overflow.
+  configValues =
     let
-      evalResult = builtins.tryEval (
+      # Sentinel value to distinguish "missing/failed" from real null config values
+      _missing = { _isMissing = true; };
+
+      # Evaluate a single leaf path to a sanitized value, or _missing on failure.
+      # tryCatchAll catches ALL errors and deeply evaluates the result.
+      evalLeaf = path:
         let
-          val = lib.attrByPath path "__MISSING__" nixos.config;
+          evalResult = builtins.tryCatchAll (
+            let
+              val = lib.attrByPath path _missing nixos.config;
+            in
+            if val == _missing then _missing else sanitizeValue 5 val
+          );
         in
-        if val == "__MISSING__" then null else sanitizeValue 5 val
-      );
+        if evalResult.success && evalResult.value != _missing then evalResult.value else _missing;
+
+      # Build a nested attrset from a list of { path; value; } entries
+      # by grouping on first path component and recursing
+      buildTree = entries:
+        let
+          # Partition into leaves (path length 1) and branches (path length > 1)
+          leaves = builtins.filter (e: builtins.length e.path == 1) entries;
+          branches = builtins.filter (e: builtins.length e.path > 1) entries;
+
+          # Group branches by their first path component
+          grouped = builtins.groupBy (e: builtins.head e.path) branches;
+
+          # Recursively build sub-trees
+          subTrees = builtins.mapAttrs (_: subEntries:
+            buildTree (map (e: {
+              path = builtins.tail e.path;
+              inherit (e) value;
+            }) subEntries)
+          ) grouped;
+
+          # Direct leaf values
+          leafAttrs = builtins.listToAttrs (map (e: {
+            name = builtins.head e.path;
+            inherit (e) value;
+          }) leaves);
+        in
+        leafAttrs // subTrees;
+
+      # Create entries from leaf nodes, filtering out failures
+      entries = builtins.concatMap (path:
+        let val = evalLeaf path;
+        in if val != _missing then [{ inherit path; value = val; }] else []
+      ) leafNodes;
     in
-    if evalResult.success && evalResult.value != null then
-      lib.recursiveUpdate acc (lib.setAttrByPath path evalResult.value)
-    else
-      acc
-  ) { } optionsInGraph;
+    buildTree entries;
 
 in
 {
@@ -342,10 +394,12 @@ in
     dotOutput
     filteredDotOutput
     configValues
+    leafNodes
     ;
   toplevelPath = toString toplevel;
   depCount = builtins.length deps;
   filteredDepCount = builtins.length filteredEdges;
   optionCount = builtins.length collectOptionPaths;
   keptNodeCount = builtins.length keptNodes;
+  leafNodeCount = builtins.length leafNodes;
 }

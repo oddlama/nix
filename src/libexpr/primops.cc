@@ -1208,6 +1208,49 @@ static RegisterPrimOp primop_tryEval({
     .fun = prim_tryEval,
 });
 
+/* Like tryEval but catches ALL evaluation errors, not just throw/assert.
+ * Also deeply evaluates the argument so that errors in nested structures
+ * (string interpolations, list elements, attrset values) are caught. */
+static void prim_tryCatchAll(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto attrs = state.buildBindings(2);
+
+    MaintainCount trylevel(state.trylevel);
+
+    ReplExitStatus (*savedDebugRepl)(ref<EvalState> es, const ValMap & extraEnv) = nullptr;
+    if (state.debugRepl && state.settings.ignoreExceptionsDuringTry) {
+        savedDebugRepl = state.debugRepl;
+        state.debugRepl = nullptr;
+    }
+
+    try {
+        state.forceValueDeep(*args[0]);
+        attrs.insert(state.s.value, args[0]);
+        attrs.insert(state.symbols.create("success"), &Value::vTrue);
+    } catch (EvalBaseError & e) {
+        attrs.insert(state.s.value, &Value::vFalse);
+        attrs.insert(state.symbols.create("success"), &Value::vFalse);
+    }
+
+    if (savedDebugRepl)
+        state.debugRepl = savedDebugRepl;
+
+    v.mkAttrs(attrs);
+}
+
+static RegisterPrimOp primop_tryCatchAll({
+    .name = "__tryCatchAll",
+    .args = {"e"},
+    .doc = R"(
+      Like `tryEval` but catches **all** evaluation errors (including
+      missing attributes, type errors, `abort`, etc.) and deeply
+      evaluates *e* before returning. Returns `{ success = true;
+      value = e; }` on success, `{ success = false; value = false; }`
+      on any error.
+    )",
+    .fun = prim_tryCatchAll,
+});
+
 /* Return an environment variable.  Use with care. */
 static void prim_getEnv(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
