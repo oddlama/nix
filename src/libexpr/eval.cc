@@ -1575,7 +1575,9 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
                     state.trackedBindings[vAttrs->attrs()] = {trackedScopeId, accessedPath};
                     for (auto & attr : *vAttrs->attrs()) {
                         // Tag any lazy value (tThunk, tApp, tPrimOpApp)
-                        if (attr.value->type(true) == nThunk) {
+                        // Don't overwrite existing explicit tags (e.g., from
+                        // tagOptionValue in NixOS modules).
+                        if (attr.value->type(true) == nThunk && !state.getThunkOrigin(attr.value)) {
                             EvalState::TrackingAttrPath memberPath = accessedPath;
                             memberPath.push_back(attr.name);
                             state.tagThunkOrigin(attr.value, trackedScopeId, memberPath);
@@ -1628,9 +1630,11 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
             if (subIt == state.trackedBindings.end()) {
                 state.trackedBindings[vAttrs->attrs()] = {trackedScopeId, accessedPath};
 
-                // Tag any lazy member values for accessor tracking
+                // Tag any lazy member values for accessor tracking.
+                // Don't overwrite existing explicit tags (e.g., from
+                // tagOptionValue in NixOS modules).
                 for (auto & attr : *vAttrs->attrs()) {
-                    if (attr.value->type(true) == nThunk) {
+                    if (attr.value->type(true) == nThunk && !state.getThunkOrigin(attr.value)) {
                         EvalState::TrackingAttrPath memberPath = accessedPath;
                         memberPath.push_back(attr.name);
                         state.tagThunkOrigin(attr.value, trackedScopeId, memberPath);

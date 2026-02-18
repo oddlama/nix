@@ -137,9 +137,14 @@ void EvalState::forceValue(Value & v, const PosIdx pos)
                     trackedBindings[v.attrs()] = {originScopeId, originPath};
                     for (auto & attr : *v.attrs()) {
                         if (attr.value->type(true) == nThunk) {
-                            TrackingAttrPath memberPath = originPath;
-                            memberPath.push_back(attr.name);
-                            tagThunkOrigin(attr.value, originScopeId, memberPath);
+                            // Don't overwrite existing explicit tags (e.g., from
+                            // tagOptionValue in NixOS modules which tags option
+                            // .value thunks with the option path directly).
+                            if (!getThunkOrigin(attr.value)) {
+                                TrackingAttrPath memberPath = originPath;
+                                memberPath.push_back(attr.name);
+                                tagThunkOrigin(attr.value, originScopeId, memberPath);
+                            }
                         }
                     }
                 }

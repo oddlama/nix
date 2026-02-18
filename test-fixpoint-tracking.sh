@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Test script for fixpoint dependency tracking
 
-NIX_CMD="./build/src/nix/nix"
+NIX_CMD="${NIX_CMD:-./build/src/nix/nix}"
 
 # Colors for output
 RED='\033[0;31m'

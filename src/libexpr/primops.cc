@@ -5446,6 +5446,72 @@ static RegisterPrimOp primop_tagThunkOrigin({
     .fun = prim_tagThunkOrigin,
 });
 
+/* Tag a specific attribute's thunk in-place within an attrset.
+   Unlike tagThunkOrigin which tags a value passed as argument (creating a wrapper
+   thunk problem when used inside { value = tagThunkOrigin ... }), this tags the
+   actual Value* stored in the attrset's Bindings, avoiding any wrapper. */
+void prim_tagAttrThunkOrigin(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    // arg 0: scope ID (integer)
+    // arg 1: origin path (list of strings)
+    // arg 2: attribute name (string)
+    // arg 3: attrset containing the attribute
+
+    auto scopeId = state.forceInt(*args[0], pos, "while evaluating the first argument (scopeId) passed to builtins.tagAttrThunkOrigin");
+
+    state.forceList(*args[1], pos, "while evaluating the second argument (path) passed to builtins.tagAttrThunkOrigin");
+
+    // Parse origin path
+    EvalState::TrackingAttrPath path;
+    for (auto elem : args[1]->listView()) {
+        state.forceStringNoCtx(*elem, pos, "while evaluating a path element in builtins.tagAttrThunkOrigin");
+        path.push_back(state.symbols.create(elem->string_view()));
+    }
+
+    auto attrName = state.forceStringNoCtx(*args[2], pos, "while evaluating the third argument (attrName) passed to builtins.tagAttrThunkOrigin");
+    auto name = state.symbols.create(attrName);
+
+    // Force the attrset to get its Bindings
+    state.forceAttrs(*args[3], pos, "while evaluating the fourth argument (attrset) passed to builtins.tagAttrThunkOrigin");
+
+    // Find the attribute in the Bindings
+    auto * attr = args[3]->attrs()->get(name);
+    if (!attr) {
+        state.error<EvalError>("attribute '%1%' not found in attrset", state.symbols[name])
+            .atPos(pos)
+            .debugThrow();
+    }
+
+    // Tag the Value* directly in the Bindings — no wrapper thunk created
+    state.tagThunkOrigin(attr->value, scopeId.value, path);
+
+    // Return the attrset unchanged
+    v = *args[3];
+}
+
+static RegisterPrimOp primop_tagAttrThunkOrigin({
+    .name = "__tagAttrThunkOrigin",
+    .args = {"scopeId", "path", "attrName", "attrset"},
+    .doc = R"(
+      Tag a specific attribute's thunk directly within an attrset's Bindings.
+
+      Unlike `tagThunkOrigin`, which tags a value passed as an argument (and
+      thus creates a wrapper thunk when used inside `{ value = tagThunkOrigin ... }`),
+      this function tags the actual `Value*` stored in the attrset's internal
+      `Bindings` structure. This avoids the wrapper thunk problem where
+      auto-registration would tag the wrapper with an incorrect path.
+
+      Arguments:
+      - scopeId: The tracking scope ID
+      - path: Origin path (list of strings)
+      - attrName: The attribute name whose thunk to tag
+      - attrset: The attrset containing the attribute
+
+      Returns the attrset unchanged. The tagging is a side effect.
+    )",
+    .fun = prim_tagAttrThunkOrigin,
+});
+
 /* Get the recorded dependencies for a tracking scope. */
 void prim_getDependencies(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
